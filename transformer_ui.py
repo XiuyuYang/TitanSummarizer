@@ -6,21 +6,22 @@ TitanSummarizer Transformer UI - 基于Transformer的小说摘要生成器图形
 允许用户选择小说文件并显示日志和分章节的摘要总结
 """
 
-import os
 import sys
-import time
-import re
-import json
+import os
 import logging
+import re
+import time
 import torch
 from datetime import datetime
+import json
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QPushButton, QLabel, QFileDialog, QTextEdit, QComboBox, 
                             QSpinBox, QDoubleSpinBox, QProgressBar, QTabWidget, 
                             QSplitter, QTreeWidget, QTreeWidgetItem, QMessageBox,
-                            QCheckBox, QGroupBox, QRadioButton, QButtonGroup)
+                            QCheckBox, QGroupBox, QRadioButton, QButtonGroup, QSplashScreen,
+                            QDialog, QProgressDialog)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QMutex, QWaitCondition
-from PyQt5.QtGui import QFont, QIcon, QTextCursor
+from PyQt5.QtGui import QFont, QIcon, QTextCursor, QPixmap
 
 # 导入摘要器模块
 try:
@@ -58,13 +59,14 @@ class TransformerSummarizerThread(QThread):
     finished_signal = pyqtSignal(dict)
     
     def __init__(self, file_path, model_name="bart-base-chinese", by_chapter=True, 
-                max_summary_length=150, device=None):
+                max_summary_length=150, device=None, advanced_params=None):
         super().__init__()
         self.file_path = file_path
         self.model_name = model_name
         self.by_chapter = by_chapter
         self.max_summary_length = max_summary_length
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
+        self.advanced_params = advanced_params or {}  # 添加高级参数
         self.paused = False
         self.stopped = False  # 添加停止标志
         self.mutex = QMutex()  # 用于线程同步
@@ -126,7 +128,15 @@ class TransformerSummarizerThread(QThread):
             # 加载模型
             try:
                 self.update_signal.emit(f"正在加载模型: {self.model_name}...")
+                
+                # 更新进度 - 模型加载过程
+                self.progress_signal.emit(12)
+                self.update_signal.emit("正在初始化分词器...")
+                
+                # 加载模型 - 分步骤更新进度
                 model, tokenizer, device, max_length = load_model(self.model_name, self.device)
+                
+                self.progress_signal.emit(18)
                 self.update_signal.emit(f"模型加载完成，使用设备: {device}")
             except ImportError as e:
                 self.update_signal.emit(f"错误: 缺少必要的依赖库 - {str(e)}")
@@ -193,7 +203,8 @@ class TransformerSummarizerThread(QThread):
                     device, 
                     max_length,
                     max_summary_length=self.max_summary_length,
-                    chapter_callback=chapter_callback
+                    chapter_callback=chapter_callback,
+                    advanced_params=self.advanced_params  # 传递高级参数
                 )
                 
                 # 检查是否已停止
@@ -226,7 +237,8 @@ class TransformerSummarizerThread(QThread):
                     tokenizer, 
                     device, 
                     max_length,
-                    max_summary_length=self.max_summary_length * 2
+                    max_summary_length=self.max_summary_length * 2,
+                    advanced_params=self.advanced_params  # 传递高级参数
                 )
                 
                 # 检查是否已停止
@@ -293,10 +305,20 @@ class TransformerSummarizerThread(QThread):
 
 # 主窗口
 class TransformerSummarizerUI(QMainWindow):
-    def __init__(self):
+    """
+    基于Transformer的文本摘要生成器UI
+    """
+    def __init__(self, update_progress=None):
         super().__init__()
+        self.logger = logging.getLogger("TransformerSummarizerUI")
+        self.summarizer_thread = None
+        self.update_progress = update_progress
+        # 设置窗口标志，确保不会自动显示
+        self.setAttribute(Qt.WA_DontShowOnScreen, True)
         self.init_ui()
         self.chapters_data = []
+        # 移除不显示标志，允许后续显示
+        self.setAttribute(Qt.WA_DontShowOnScreen, False)
         
     def init_ui(self):
         self.setWindowTitle("TitanSummarizer Transformer - 基于深度学习的小说摘要生成器")
@@ -332,7 +354,14 @@ class TransformerSummarizerUI(QMainWindow):
         
         # 检查模型依赖并添加可用模型
         self.available_models = []
-        for model_name in AVAILABLE_MODELS.keys():
+        self.unavailable_models = {}  # 存储不可用模型的信息
+        
+        for model_name, model_info in AVAILABLE_MODELS.items():
+            # 检查模型是否标记为不可用
+            if model_info.get("available") is False:
+                self.unavailable_models[model_name] = model_info.get("message", "此模型暂不可用")
+                continue
+                
             try:
                 from transformer_summarizer import check_dependencies
                 if check_dependencies(model_name):
@@ -340,10 +369,24 @@ class TransformerSummarizerUI(QMainWindow):
                 else:
                     logger.warning(f"模型 {model_name} 缺少必要的依赖库，已禁用")
             except:
-                # 如果check_dependencies不可用，添加所有模型
+                # 如果check_dependencies不可用，添加所有未标记为不可用的模型
                 self.available_models.append(model_name)
         
+        # 添加可用模型
         self.model_combo.addItems(self.available_models)
+        
+        # 添加不可用模型（灰色显示）
+        for model_name in self.unavailable_models.keys():
+            index = self.model_combo.count()
+            self.model_combo.addItem(f"{model_name} (暂不可用)")
+            # 禁用该选项
+            self.model_combo.model().item(index).setEnabled(False)
+            # 设置工具提示
+            self.model_combo.setItemData(index, self.unavailable_models[model_name], Qt.ToolTipRole)
+        
+        # 连接信号
+        self.model_combo.currentIndexChanged.connect(self.on_model_changed)
+        
         model_layout.addWidget(model_label)
         model_layout.addWidget(self.model_combo)
         param_layout.addLayout(model_layout)
@@ -364,6 +407,64 @@ class TransformerSummarizerUI(QMainWindow):
         length_layout.addWidget(length_tip)
         
         param_layout.addLayout(length_layout)
+        
+        # 添加高级参数设置区域
+        self.advanced_group = QGroupBox("高级参数设置")
+        self.advanced_group.setCheckable(True)
+        self.advanced_group.setChecked(False)  # 默认不启用
+        advanced_layout = QVBoxLayout()
+        self.advanced_group.setLayout(advanced_layout)
+        
+        # 重复惩罚参数
+        rep_penalty_layout = QHBoxLayout()
+        rep_penalty_label = QLabel("重复惩罚:")
+        self.rep_penalty_spin = QDoubleSpinBox()
+        self.rep_penalty_spin.setRange(1.0, 5.0)
+        self.rep_penalty_spin.setSingleStep(0.1)
+        self.rep_penalty_spin.setValue(1.5)
+        rep_penalty_layout.addWidget(rep_penalty_label)
+        rep_penalty_layout.addWidget(self.rep_penalty_spin)
+        advanced_layout.addLayout(rep_penalty_layout)
+        
+        # 采样温度参数
+        temperature_layout = QHBoxLayout()
+        temperature_label = QLabel("采样温度:")
+        self.temperature_spin = QDoubleSpinBox()
+        self.temperature_spin.setRange(0.1, 2.0)
+        self.temperature_spin.setSingleStep(0.1)
+        self.temperature_spin.setValue(1.0)
+        temperature_layout.addWidget(temperature_label)
+        temperature_layout.addWidget(self.temperature_spin)
+        advanced_layout.addLayout(temperature_layout)
+        
+        # Top-p采样参数
+        top_p_layout = QHBoxLayout()
+        top_p_label = QLabel("Top-p采样:")
+        self.top_p_spin = QDoubleSpinBox()
+        self.top_p_spin.setRange(0.1, 1.0)
+        self.top_p_spin.setSingleStep(0.05)
+        self.top_p_spin.setValue(0.9)
+        top_p_layout.addWidget(top_p_label)
+        top_p_layout.addWidget(self.top_p_spin)
+        advanced_layout.addLayout(top_p_layout)
+        
+        # 采样策略选择
+        strategy_layout = QHBoxLayout()
+        strategy_label = QLabel("生成策略:")
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItems(["Beam Search", "采样", "贪婪"])
+        self.strategy_combo.currentIndexChanged.connect(self.update_strategy_ui)
+        strategy_layout.addWidget(strategy_label)
+        strategy_layout.addWidget(self.strategy_combo)
+        advanced_layout.addLayout(strategy_layout)
+        
+        # 添加高级参数说明
+        advanced_tip = QLabel("(调整这些参数可以影响摘要的质量和多样性)")
+        advanced_tip.setStyleSheet("color: gray; font-size: 9pt;")
+        advanced_layout.addWidget(advanced_tip)
+        
+        # 添加高级参数区域到主布局（放在参数设置区域之后，进度条之前）
+        main_layout.addWidget(self.advanced_group)
         
         # 摘要模式
         mode_group = QGroupBox("摘要模式")
@@ -422,6 +523,22 @@ class TransformerSummarizerUI(QMainWindow):
         # 进度条
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
+        self.progress_bar.setAlignment(Qt.AlignCenter)
+        self.progress_bar.setFormat("就绪 %p%")
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid grey;
+                border-radius: 5px;
+                text-align: center;
+                font-weight: bold;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                width: 10px;
+                margin: 0.5px;
+            }
+        """)
+        self.progress_bar.setMinimumHeight(25)
         main_layout.addWidget(self.progress_bar)
         
         # 创建分割器
@@ -460,7 +577,7 @@ class TransformerSummarizerUI(QMainWindow):
         if not SUMMARIZER_AVAILABLE:
             QMessageBox.warning(self, "依赖错误", "无法导入Transformer摘要器模块，请确保已安装所有依赖。")
             self.start_button.setEnabled(False)
-        
+            
         # 检查PyTorch和CUDA
         if torch.cuda.is_available():
             self.log_text.append(f"检测到CUDA: {torch.cuda.get_device_name(0)}")
@@ -474,6 +591,9 @@ class TransformerSummarizerUI(QMainWindow):
         if os.path.exists(default_novel_path):
             self.file_path.setText(default_novel_path)
             self.log_text.append(f"已默认加载小说: {default_novel_path}")
+            
+        # 初始化UI状态
+        self.update_strategy_ui()
     
     def browse_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -506,6 +626,42 @@ class TransformerSummarizerUI(QMainWindow):
         elif device_selection == "GPU" and torch.cuda.is_available():
             device = "cuda"
         
+        # 获取高级参数
+        advanced_params = {}
+        if hasattr(self, 'advanced_group') and self.advanced_group.isChecked():
+            # 重复惩罚
+            advanced_params['repetition_penalty'] = self.rep_penalty_spin.value()
+            
+            # 采样温度
+            advanced_params['temperature'] = self.temperature_spin.value()
+            
+            # Top-p采样
+            advanced_params['top_p'] = self.top_p_spin.value()
+            
+            # 生成策略
+            strategy = self.strategy_combo.currentText()
+            if strategy == "Beam Search":
+                advanced_params['do_sample'] = False
+                advanced_params['num_beams'] = 5
+                # 移除采样相关参数，避免冲突
+                if 'temperature' in advanced_params:
+                    del advanced_params['temperature']
+                if 'top_p' in advanced_params:
+                    del advanced_params['top_p']
+            elif strategy == "采样":
+                advanced_params['do_sample'] = True
+                advanced_params['num_beams'] = 1
+            elif strategy == "贪婪":
+                advanced_params['do_sample'] = False
+                advanced_params['num_beams'] = 1
+                # 移除采样相关参数，避免冲突
+                if 'temperature' in advanced_params:
+                    del advanced_params['temperature']
+                if 'top_p' in advanced_params:
+                    del advanced_params['top_p']
+            
+            self.log_text.append(f"使用高级参数: {advanced_params}")
+        
         # 清空之前的结果
         self.log_text.clear()
         self.summary_text.clear()
@@ -536,16 +692,38 @@ class TransformerSummarizerUI(QMainWindow):
             model_name, 
             by_chapter, 
             max_summary_length,
-            device
+            device,
+            advanced_params  # 传递高级参数
         )
+        
+        # 连接信号
         self.thread.update_signal.connect(self.update_log)
-        self.thread.progress_signal.connect(self.update_progress)
+        
+        # 确保self.update_progress是一个方法而不是None
+        if hasattr(self, 'update_progress') and callable(self.update_progress):
+            self.thread.progress_signal.connect(self.update_progress)
+        
         self.thread.chapter_signal.connect(self.add_chapter)
         self.thread.finished_signal.connect(self.summarization_finished)
+        
+        # 启动线程
         self.thread.start()
     
     def update_log(self, message):
-        self.log_text.append(message)
+        # 添加时间戳
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        formatted_message = f"[{timestamp}] {message}"
+        
+        # 根据消息类型设置不同的样式
+        if "错误" in message or "失败" in message:
+            formatted_message = f'<span style="color:red;">{formatted_message}</span>'
+        elif "完成" in message or "成功" in message:
+            formatted_message = f'<span style="color:green;">{formatted_message}</span>'
+        elif "加载" in message or "初始化" in message:
+            formatted_message = f'<span style="color:blue;">{formatted_message}</span>'
+        
+        # 添加到日志
+        self.log_text.append(formatted_message)
         self.statusBar().showMessage(message)
         logger.info(message)
         
@@ -553,9 +731,26 @@ class TransformerSummarizerUI(QMainWindow):
         cursor = self.log_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.log_text.setTextCursor(cursor)
+        
+        # 强制更新UI
+        QApplication.processEvents()
     
     def update_progress(self, value):
+        """更新进度条"""
         self.progress_bar.setValue(value)
+        
+        # 更新进度条文本
+        if value < 20:
+            self.progress_bar.setFormat("加载模型中... %p%")
+        elif value < 50:
+            self.progress_bar.setFormat("处理文本中... %p%")
+        elif value < 90:
+            self.progress_bar.setFormat("生成摘要中... %p%")
+        else:
+            self.progress_bar.setFormat("即将完成... %p%")
+        
+        # 强制更新UI
+        QApplication.processEvents()
     
     def add_chapter(self, chapter_data):
         # 添加到章节数据
@@ -655,10 +850,55 @@ class TransformerSummarizerUI(QMainWindow):
             # 不需要等待线程结束，线程会自行发出finished信号
             # 按钮状态将在summarization_finished中更新
 
+    def update_strategy_ui(self):
+        """根据选择的生成策略更新UI"""
+        strategy = self.strategy_combo.currentText()
+        
+        # 启用或禁用温度和top_p参数
+        enable_sampling_params = (strategy == "采样")
+        self.temperature_spin.setEnabled(enable_sampling_params)
+        self.top_p_spin.setEnabled(enable_sampling_params)
+        
+        # 更新参数说明
+        if strategy == "Beam Search":
+            self.advanced_group.setToolTip("Beam Search策略使用多个候选序列，生成更稳定的摘要")
+        elif strategy == "采样":
+            self.advanced_group.setToolTip("采样策略使用温度和top_p参数控制生成的多样性，生成更有创意的摘要")
+        elif strategy == "贪婪":
+            self.advanced_group.setToolTip("贪婪策略每次选择概率最高的词，生成确定性的摘要")
+
+    def on_model_changed(self):
+        # 当模型选择发生变化时，更新UI
+        self.update_strategy_ui()
+
 def main():
+    # 记录开始时间
+    start_time = time.time()
+    
+    # 创建应用程序实例
     app = QApplication(sys.argv)
-    window = TransformerSummarizerUI()
+    
+    # 预先处理事件，确保Qt系统已初始化
+    app.processEvents()
+    
+    # 创建主窗口 - 不使用进度更新回调
+    window = TransformerSummarizerUI(update_progress=None)
+    
+    # 显示主窗口
     window.show()
+    window.raise_()
+    window.activateWindow()
+    
+    # 计算并显示启动时间
+    elapsed_time = time.time() - start_time
+    window.log_text.append(f"<span style='color:blue; font-weight:bold;'>程序启动耗时: {elapsed_time:.2f} 秒</span>")
+    
+    # 强制更新UI，确保启动时间显示
+    app.processEvents()
+    
+    # 将启动时间信息添加到日志
+    logger.info(f"程序启动耗时: {elapsed_time:.2f} 秒")
+    
     sys.exit(app.exec_())
 
 if __name__ == "__main__":

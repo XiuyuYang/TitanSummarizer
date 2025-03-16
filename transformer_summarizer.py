@@ -29,11 +29,6 @@ logger = logging.getLogger("TransformerSummarizer")
 
 # 可用的预训练模型
 AVAILABLE_MODELS = {
-    "bart-base-chinese": {
-        "model_name": "fnlp/bart-base-chinese",
-        "max_length": 1024,
-        "type": "bart"
-    },
     "mt5-small-chinese": {
         "model_name": "google/mt5-small",
         "max_length": 512,
@@ -41,19 +36,23 @@ AVAILABLE_MODELS = {
         "use_fast": False,  # 禁用fast tokenizer，避免protobuf错误
         "requires": ["sentencepiece"]  # 标记需要sentencepiece库
     },
-    "cpt-base": {
-        "model_name": "fnlp/cpt-base",
-        "max_length": 1024,
-        "type": "bart",
-        "use_fast": False  # 禁用fast tokenizer，避免乱码问题
+    # 预留选项，暂不可用
+    "longformer-chinese": {
+        "model_name": "暂不可用",
+        "max_length": 4096,
+        "type": "longformer",
+        "available": False,  # 标记为不可用
+        "message": "Longformer模型暂未实现"
+    },
+    # 预留选项，暂不可用
+    "bigbird-chinese": {
+        "model_name": "暂不可用",
+        "max_length": 4096,
+        "type": "bigbird",
+        "available": False,  # 标记为不可用
+        "message": "BigBird模型暂未实现"
     }
-    # 暂时移除有问题的pegasus模型
-    # "pegasus-base-chinese": {
-    #     "model_name": "IDEA-CCNL/Randeng-Pegasus-523M-Summary-Chinese",
-    #     "max_length": 1024,
-    #     "type": "pegasus",
-    #     "requires": ["protobuf"]  # 标记需要protobuf库
-    # }
+    # 其他模型已移除
 }
 
 def read_file(file_path: str) -> str:
@@ -150,6 +149,12 @@ def check_dependencies(model_name: str) -> bool:
         return False
     
     model_info = AVAILABLE_MODELS[model_name]
+    
+    # 检查模型是否标记为不可用
+    if model_info.get("available") is False:
+        logger.warning(f"模型 {model_name} 暂不可用: {model_info.get('message', '未提供原因')}")
+        return False
+    
     required_libs = model_info.get("requires", [])
     
     for lib in required_libs:
@@ -174,8 +179,9 @@ def load_model(model_name: str, device: Optional[str] = None) -> Tuple[Any, Any,
         raise ValueError(f"不支持的模型: {model_name}，可用模型: {list(AVAILABLE_MODELS.keys())}")
     
     # 检查依赖
+    logger.info(f"检查模型 {model_name} 的依赖...")
     if not check_dependencies(model_name):
-        raise ImportError(f"模型 {model_name} 缺少必要的依赖库")
+        raise ImportError(f"模型 {model_name} 缺少必要的依赖库或暂不可用")
     
     model_info = AVAILABLE_MODELS[model_name]
     model_path = model_info["model_name"]
@@ -185,28 +191,47 @@ def load_model(model_name: str, device: Optional[str] = None) -> Tuple[Any, Any,
     # 确定设备
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"将使用设备: {device}")
     
     # 加载分词器
+    logger.info(f"正在加载分词器 {model_path}...")
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=use_fast)
+        logger.info("分词器加载完成")
     except Exception as e:
         logger.error(f"加载分词器失败: {str(e)}")
         # 尝试使用慢速分词器
         logger.info("尝试使用慢速分词器...")
         tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+        logger.info("慢速分词器加载完成")
     
     # 加载模型
+    logger.info(f"正在加载模型 {model_path}...")
     try:
         if model_info["type"] == "bart":
+            logger.info("使用BART模型架构")
             model = BartForConditionalGeneration.from_pretrained(model_path)
         elif model_info["type"] == "t5":
+            logger.info("使用T5模型架构")
             model = T5ForConditionalGeneration.from_pretrained(model_path)
         elif model_info["type"] == "pegasus":
+            logger.info("使用Pegasus模型架构")
             model = PegasusForConditionalGeneration.from_pretrained(model_path)
+        elif model_info["type"] == "longformer":
+            logger.info("使用Longformer模型架构")
+            # 这里只是预留，实际上这个分支不会被执行，因为check_dependencies会先返回False
+            raise NotImplementedError("Longformer模型暂未实现")
+        elif model_info["type"] == "bigbird":
+            logger.info("使用BigBird模型架构")
+            # 这里只是预留，实际上这个分支不会被执行，因为check_dependencies会先返回False
+            raise NotImplementedError("BigBird模型暂未实现")
         else:
+            logger.info("使用通用Seq2Seq模型架构")
             model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
         
+        logger.info(f"正在将模型移动到 {device} 设备...")
         model = model.to(device)
+        logger.info("模型加载完成")
     except Exception as e:
         logger.error(f"加载模型失败: {str(e)}")
         raise
@@ -257,9 +282,19 @@ def extract_key_sentences(text: str, num_sentences: int = 5) -> str:
     return summary
 
 def generate_summary(text: str, model: Any, tokenizer: Any, device: str, 
-                    max_length: int, max_summary_length: int = 150) -> str:
+                    max_length: int, max_summary_length: int = 150,
+                    advanced_params: Optional[Dict[str, Any]] = None) -> str:
     """
     使用Transformer模型生成摘要
+    
+    参数:
+        text: 文本内容
+        model: 预训练模型
+        tokenizer: 分词器
+        device: 计算设备
+        max_length: 模型输入最大长度
+        max_summary_length: 摘要最大长度
+        advanced_params: 高级参数字典，可以包含repetition_penalty, temperature, top_p等
     """
     # 计算原文长度
     original_length = len(text)
@@ -358,8 +393,13 @@ def generate_summary(text: str, model: Any, tokenizer: Any, device: str,
             
         generation_params.update(t5_params)
     
+    # 应用高级参数（如果提供）
+    if advanced_params:
+        logger.info(f"应用高级参数: {advanced_params}")
+        generation_params.update(advanced_params)
+    
     # 记录实际使用的参数
-    logger.info(f"摘要生成参数: max_length={max_summary_length}, min_length={min_length}")
+    logger.info(f"摘要生成参数: {generation_params}")
     
     # 生成摘要
     with torch.no_grad():
@@ -443,7 +483,8 @@ def generate_summary(text: str, model: Any, tokenizer: Any, device: str,
 
 def summarize_by_chapter(content: str, model: Any, tokenizer: Any, device: str, 
                         max_length: int, max_summary_length: int = 150, 
-                        chapter_callback: Optional[callable] = None) -> Dict[str, Any]:
+                        chapter_callback: Optional[callable] = None,
+                        advanced_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     按章节生成摘要
     
@@ -455,6 +496,7 @@ def summarize_by_chapter(content: str, model: Any, tokenizer: Any, device: str,
         max_length: 模型输入最大长度
         max_summary_length: 摘要最大长度
         chapter_callback: 章节处理完成后的回调函数，接收章节信息字典作为参数
+        advanced_params: 高级参数字典，传递给generate_summary函数
     """
     # 检测章节
     chapters = detect_chapters(content)
@@ -474,7 +516,8 @@ def summarize_by_chapter(content: str, model: Any, tokenizer: Any, device: str,
             tokenizer, 
             device, 
             max_length,
-            max_summary_length
+            max_summary_length,
+            advanced_params
         )
         
         # 添加章节标题
@@ -507,7 +550,8 @@ def summarize_by_chapter(content: str, model: Any, tokenizer: Any, device: str,
     }
 
 def summarize_full_text(content: str, model: Any, tokenizer: Any, device: str, 
-                       max_length: int, max_summary_length: int = 300) -> Dict[str, Any]:
+                       max_length: int, max_summary_length: int = 300,
+                       advanced_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     生成全文摘要
     """
@@ -518,7 +562,8 @@ def summarize_full_text(content: str, model: Any, tokenizer: Any, device: str,
         tokenizer, 
         device, 
         max_length,
-        max_summary_length
+        max_summary_length,
+        advanced_params
     )
     
     # 创建章节信息
