@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-TitanSummarizer 增强版UI - 小说摘要生成器图形界面
+TitanSummarizer Transformer UI - 基于Transformer的小说摘要生成器图形界面
 允许用户选择小说文件并显示日志和分章节的摘要总结
 """
 
@@ -10,8 +10,9 @@ import os
 import sys
 import time
 import re
-import logging
 import json
+import logging
+import torch
 from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QPushButton, QLabel, QFileDialog, QTextEdit, QComboBox, 
@@ -23,18 +24,21 @@ from PyQt5.QtGui import QFont, QIcon, QTextCursor
 
 # 导入摘要器模块
 try:
-    from titan_summarizer import logger as titan_logger
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples"))
-    from simple_chinese_summarizer import textrank_summarize, extract_keywords, read_file
+    # 添加当前目录到路径
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from transformer_summarizer import (
+        load_model, detect_chapters, summarize_by_chapter, 
+        summarize_full_text, read_file, AVAILABLE_MODELS
+    )
     SUMMARIZER_AVAILABLE = True
 except ImportError as e:
     SUMMARIZER_AVAILABLE = False
-    print(f"导入摘要器模块失败: {e}")
+    print(f"导入Transformer摘要器模块失败: {e}")
 
 # 配置日志
 log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log")
 os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"ui_enhanced_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+log_file = os.path.join(log_dir, f"transformer_ui_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,67 +48,23 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger("TitanSummarizerEnhancedUI")
-
-# 章节检测和分割函数
-def detect_chapters(text):
-    """检测小说章节"""
-    # 常见的章节标题模式
-    patterns = [
-        r'第[零一二三四五六七八九十百千万亿\d]+章\s*[^\n]*',  # 第X章 标题
-        r'第[零一二三四五六七八九十百千万亿\d]+节\s*[^\n]*',  # 第X节 标题
-        r'Chapter\s+\d+\s*[^\n]*',  # Chapter X 标题
-        r'\d+\.\s+[^\n]+',  # 数字编号. 标题
-    ]
-    
-    # 合并模式
-    combined_pattern = '|'.join(f'({p})' for p in patterns)
-    
-    # 查找所有匹配
-    matches = list(re.finditer(combined_pattern, text))
-    
-    chapters = []
-    for i, match in enumerate(matches):
-        title = match.group(0).strip()
-        start_pos = match.start()
-        
-        # 确定章节结束位置
-        if i < len(matches) - 1:
-            end_pos = matches[i+1].start()
-        else:
-            end_pos = len(text)
-        
-        chapters.append({
-            'title': title,
-            'start': start_pos,
-            'end': end_pos,
-            'content': text[start_pos:end_pos]
-        })
-    
-    # 如果没有检测到章节，将整个文本作为一个章节
-    if not chapters:
-        chapters.append({
-            'title': '全文',
-            'start': 0,
-            'end': len(text),
-            'content': text
-        })
-    
-    return chapters
+logger = logging.getLogger("TransformerSummarizerUI")
 
 # 摘要生成线程
-class EnhancedSummarizerThread(QThread):
+class TransformerSummarizerThread(QThread):
     update_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
     chapter_signal = pyqtSignal(dict)
     finished_signal = pyqtSignal(dict)
     
-    def __init__(self, file_path, ratio=0.05, algorithm="textrank", by_chapter=True):
+    def __init__(self, file_path, model_name="bart-base-chinese", by_chapter=True, 
+                max_summary_length=150, device=None):
         super().__init__()
         self.file_path = file_path
-        self.ratio = ratio
-        self.algorithm = algorithm
+        self.model_name = model_name
         self.by_chapter = by_chapter
+        self.max_summary_length = max_summary_length
+        self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         
     def run(self):
         try:
@@ -117,147 +77,81 @@ class EnhancedSummarizerThread(QThread):
             self.update_signal.emit(f"文件读取完成，总长度: {len(content)} 字符")
             self.progress_signal.emit(10)
             
-            # 提取全文关键词
-            self.update_signal.emit("正在提取全文关键词...")
-            keywords = extract_keywords(content, top_n=20)
-            self.update_signal.emit(f"全文关键词: {', '.join(keywords)}")
+            # 加载模型
+            self.update_signal.emit(f"正在加载模型: {self.model_name}...")
+            model, tokenizer, device, max_length = load_model(self.model_name, self.device)
+            self.update_signal.emit(f"模型加载完成，使用设备: {device}")
             self.progress_signal.emit(20)
             
-            # 检测章节
-            self.update_signal.emit("正在检测章节...")
-            chapters = detect_chapters(content)
-            self.update_signal.emit(f"检测到 {len(chapters)} 个章节")
-            self.progress_signal.emit(30)
-            
-            # 创建结果字典
-            result = {
-                "file_path": self.file_path,
-                "total_length": len(content),
-                "keywords": keywords,
-                "chapters": [],
-                "full_summary": "",
-                "stats": {
-                    "original_length": len(content),
-                    "summary_length": 0,
-                    "compression_ratio": 0,
-                    "elapsed_time": 0
-                }
-            }
-            
+            # 生成摘要
             start_time = time.time()
             
             if self.by_chapter:
-                # 按章节生成摘要
-                self.update_signal.emit(f"使用 {self.algorithm} 算法按章节生成摘要，比例: {self.ratio}...")
-                
-                total_chapters = len(chapters)
-                full_summary = []
-                
-                for i, chapter in enumerate(chapters):
-                    chapter_title = chapter['title']
-                    chapter_content = chapter['content']
-                    
-                    self.update_signal.emit(f"处理章节 {i+1}/{total_chapters}: {chapter_title}")
-                    
-                    # 生成章节摘要
-                    chapter_summary = textrank_summarize(
-                        chapter_content, 
-                        ratio=self.ratio, 
-                        use_textrank=(self.algorithm == "textrank")
-                    )
-                    
-                    # 提取章节关键词
-                    chapter_keywords = extract_keywords(chapter_content, top_n=10)
-                    
-                    # 添加到结果
-                    chapter_result = {
-                        "title": chapter_title,
-                        "original_length": len(chapter_content),
-                        "summary": chapter_summary,
-                        "summary_length": len(chapter_summary),
-                        "keywords": chapter_keywords
-                    }
-                    
-                    result["chapters"].append(chapter_result)
-                    full_summary.append(f"【{chapter_title}】\n\n{chapter_summary}\n\n")
-                    
-                    # 发送章节信号
-                    self.chapter_signal.emit(chapter_result)
-                    
-                    # 更新进度
-                    progress = 30 + int(60 * (i+1) / total_chapters)
-                    self.progress_signal.emit(progress)
-                
-                # 合并所有章节摘要
-                result["full_summary"] = "\n".join(full_summary)
-                result["stats"]["summary_length"] = len(result["full_summary"])
-                
-            else:
-                # 生成全文摘要
-                self.update_signal.emit(f"使用 {self.algorithm} 算法生成全文摘要，比例: {self.ratio}...")
-                
-                full_summary = textrank_summarize(
+                self.update_signal.emit("按章节生成摘要...")
+                result = summarize_by_chapter(
                     content, 
-                    ratio=self.ratio, 
-                    use_textrank=(self.algorithm == "textrank")
+                    model, 
+                    tokenizer, 
+                    device, 
+                    max_length,
+                    max_summary_length=self.max_summary_length
                 )
                 
-                result["full_summary"] = full_summary
-                result["stats"]["summary_length"] = len(full_summary)
-                
-                # 添加到结果
-                chapter_result = {
-                    "title": "全文摘要",
-                    "original_length": len(content),
-                    "summary": full_summary,
-                    "summary_length": len(full_summary),
-                    "keywords": keywords
-                }
-                
-                result["chapters"].append(chapter_result)
+                # 发送章节信号
+                for chapter in result["chapters"]:
+                    self.chapter_signal.emit(chapter)
+                    
+            else:
+                self.update_signal.emit("生成全文摘要...")
+                result = summarize_full_text(
+                    content, 
+                    model, 
+                    tokenizer, 
+                    device, 
+                    max_length,
+                    max_summary_length=self.max_summary_length * 2
+                )
                 
                 # 发送章节信号
-                self.chapter_signal.emit(chapter_result)
-                self.progress_signal.emit(90)
+                self.chapter_signal.emit(result["chapters"][0])
             
             elapsed_time = time.time() - start_time
-            result["stats"]["elapsed_time"] = elapsed_time
-            result["stats"]["compression_ratio"] = result["stats"]["summary_length"] / result["stats"]["original_length"]
             
             # 生成结果信息
             self.update_signal.emit(f"摘要生成完成!")
-            self.update_signal.emit(f"摘要长度: {result['stats']['summary_length']} 字符")
-            self.update_signal.emit(f"压缩比: {result['stats']['compression_ratio']:.2%}")
+            self.update_signal.emit(f"摘要长度: {len(result['full_summary'])} 字符")
+            self.update_signal.emit(f"压缩比: {len(result['full_summary']) / len(content):.2%}")
             self.update_signal.emit(f"耗时: {elapsed_time:.2f} 秒")
-            self.update_signal.emit(f"处理速度: {result['stats']['original_length'] / elapsed_time:.2f} 字符/秒")
+            self.update_signal.emit(f"处理速度: {len(content) / elapsed_time:.2f} 字符/秒")
             
             # 保存摘要
             output_dir = os.path.join(os.path.dirname(self.file_path), "summaries")
             os.makedirs(output_dir, exist_ok=True)
             
             base_name = os.path.splitext(os.path.basename(self.file_path))[0]
-            output_path = os.path.join(output_dir, f"{base_name}_summary_{self.algorithm}.txt")
+            output_path = os.path.join(output_dir, f"{base_name}_transformer_summary.txt")
             
             with open(output_path, 'w', encoding='utf-8-sig') as f:
                 f.write(result["full_summary"])
             
             # 保存详细结果
-            detail_path = os.path.join(output_dir, f"{base_name}_summary_detail.json")
+            detail_path = os.path.join(output_dir, f"{base_name}_transformer_summary_detail.json")
             with open(detail_path, 'w', encoding='utf-8-sig') as f:
                 # 创建可序列化的结果
                 serializable_result = {
-                    "file_path": result["file_path"],
-                    "total_length": result["total_length"],
-                    "keywords": result["keywords"],
+                    "file_path": self.file_path,
+                    "model": self.model_name,
+                    "by_chapter": self.by_chapter,
                     "chapters": [
                         {
                             "title": ch["title"],
                             "original_length": ch["original_length"],
                             "summary_length": ch["summary_length"],
-                            "keywords": ch["keywords"]
+                            "summary": ch["summary"]
                         } for ch in result["chapters"]
                     ],
-                    "stats": result["stats"]
+                    "elapsed_time": elapsed_time,
+                    "compression_ratio": len(result["full_summary"]) / len(content)
                 }
                 json.dump(serializable_result, f, ensure_ascii=False, indent=2)
             
@@ -275,14 +169,14 @@ class EnhancedSummarizerThread(QThread):
             logger.error(f"摘要生成失败: {str(e)}", exc_info=True)
 
 # 主窗口
-class TitanSummarizerEnhancedUI(QMainWindow):
+class TransformerSummarizerUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.init_ui()
         self.chapters_data = []
         
     def init_ui(self):
-        self.setWindowTitle("TitanSummarizer 增强版 - 小说摘要生成器")
+        self.setWindowTitle("TitanSummarizer Transformer - 基于深度学习的小说摘要生成器")
         self.setMinimumSize(1000, 800)
         
         # 主布局
@@ -308,26 +202,25 @@ class TitanSummarizerEnhancedUI(QMainWindow):
         # 参数设置区域
         param_layout = QHBoxLayout()
         
-        # 算法选择
-        algo_layout = QVBoxLayout()
-        algo_label = QLabel("摘要算法:")
-        self.algo_combo = QComboBox()
-        self.algo_combo.addItems(["textrank", "tfidf"])
-        algo_layout.addWidget(algo_label)
-        algo_layout.addWidget(self.algo_combo)
-        param_layout.addLayout(algo_layout)
+        # 模型选择
+        model_layout = QVBoxLayout()
+        model_label = QLabel("预训练模型:")
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(list(AVAILABLE_MODELS.keys()))
+        model_layout.addWidget(model_label)
+        model_layout.addWidget(self.model_combo)
+        param_layout.addLayout(model_layout)
         
-        # 摘要比例
-        ratio_layout = QVBoxLayout()
-        ratio_label = QLabel("摘要比例:")
-        self.ratio_spin = QDoubleSpinBox()
-        self.ratio_spin.setRange(0.01, 0.5)
-        self.ratio_spin.setSingleStep(0.01)
-        self.ratio_spin.setValue(0.05)
-        self.ratio_spin.setDecimals(2)
-        ratio_layout.addWidget(ratio_label)
-        ratio_layout.addWidget(self.ratio_spin)
-        param_layout.addLayout(ratio_layout)
+        # 摘要长度
+        length_layout = QVBoxLayout()
+        length_label = QLabel("摘要长度:")
+        self.length_spin = QSpinBox()
+        self.length_spin.setRange(50, 500)
+        self.length_spin.setSingleStep(10)
+        self.length_spin.setValue(150)
+        length_layout.addWidget(length_label)
+        length_layout.addWidget(self.length_spin)
+        param_layout.addLayout(length_layout)
         
         # 摘要模式
         mode_group = QGroupBox("摘要模式")
@@ -339,6 +232,18 @@ class TitanSummarizerEnhancedUI(QMainWindow):
         mode_layout.addWidget(self.full_mode)
         mode_group.setLayout(mode_layout)
         param_layout.addWidget(mode_group)
+        
+        # 设备选择
+        device_layout = QVBoxLayout()
+        device_label = QLabel("计算设备:")
+        self.device_combo = QComboBox()
+        self.device_combo.addItems(["自动选择", "CPU", "GPU"])
+        if not torch.cuda.is_available():
+            self.device_combo.setCurrentText("CPU")
+            self.device_combo.model().item(2).setEnabled(False)
+        device_layout.addWidget(device_label)
+        device_layout.addWidget(self.device_combo)
+        param_layout.addLayout(device_layout)
         
         # 开始按钮
         self.start_button = QPushButton("开始生成摘要")
@@ -375,11 +280,6 @@ class TitanSummarizerEnhancedUI(QMainWindow):
         self.summary_text.setReadOnly(True)
         self.tab_widget.addTab(self.summary_text, "摘要结果")
         
-        # 关键词选项卡
-        self.keywords_text = QTextEdit()
-        self.keywords_text.setReadOnly(True)
-        self.tab_widget.addTab(self.keywords_text, "关键词")
-        
         # 添加到分割器
         splitter.addWidget(self.chapter_tree)
         splitter.addWidget(self.tab_widget)
@@ -392,8 +292,16 @@ class TitanSummarizerEnhancedUI(QMainWindow):
         
         # 检查依赖
         if not SUMMARIZER_AVAILABLE:
-            QMessageBox.warning(self, "依赖错误", "无法导入摘要器模块，请确保已安装所有依赖。")
+            QMessageBox.warning(self, "依赖错误", "无法导入Transformer摘要器模块，请确保已安装所有依赖。")
             self.start_button.setEnabled(False)
+        
+        # 检查PyTorch和CUDA
+        if torch.cuda.is_available():
+            self.log_text.append(f"检测到CUDA: {torch.cuda.get_device_name(0)}")
+            self.log_text.append(f"CUDA版本: {torch.version.cuda}")
+        else:
+            self.log_text.append("未检测到CUDA，将使用CPU进行计算（速度较慢）")
+            self.log_text.append("建议安装支持CUDA的PyTorch版本以加速处理")
     
     def browse_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -414,14 +322,21 @@ class TitanSummarizerEnhancedUI(QMainWindow):
             return
         
         # 获取参数
-        algorithm = self.algo_combo.currentText()
-        ratio = self.ratio_spin.value()
+        model_name = self.model_combo.currentText()
+        max_summary_length = self.length_spin.value()
         by_chapter = self.chapter_mode.isChecked()
+        
+        # 设置设备
+        device = None
+        device_selection = self.device_combo.currentText()
+        if device_selection == "CPU":
+            device = "cpu"
+        elif device_selection == "GPU" and torch.cuda.is_available():
+            device = "cuda"
         
         # 清空之前的结果
         self.log_text.clear()
         self.summary_text.clear()
-        self.keywords_text.clear()
         self.chapter_tree.clear()
         self.chapters_data = []
         
@@ -430,7 +345,13 @@ class TitanSummarizerEnhancedUI(QMainWindow):
         self.progress_bar.setValue(0)
         
         # 创建并启动线程
-        self.thread = EnhancedSummarizerThread(file_path, ratio, algorithm, by_chapter)
+        self.thread = TransformerSummarizerThread(
+            file_path, 
+            model_name, 
+            by_chapter, 
+            max_summary_length,
+            device
+        )
         self.thread.update_signal.connect(self.update_log)
         self.thread.progress_signal.connect(self.update_progress)
         self.thread.chapter_signal.connect(self.add_chapter)
@@ -469,9 +390,6 @@ class TitanSummarizerEnhancedUI(QMainWindow):
             # 显示摘要
             self.summary_text.setText(chapter["summary"])
             
-            # 显示关键词
-            self.keywords_text.setText(", ".join(chapter["keywords"]))
-            
             # 切换到摘要选项卡
             self.tab_widget.setCurrentIndex(1)
     
@@ -489,7 +407,7 @@ class TitanSummarizerEnhancedUI(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    window = TitanSummarizerEnhancedUI()
+    window = TransformerSummarizerUI()
     window.show()
     sys.exit(app.exec_())
 

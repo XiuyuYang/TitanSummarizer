@@ -1,89 +1,107 @@
-# TitanSummarizer - 大文本摘要系统
+# TitanSummarizer - 基于Transformer的小说摘要生成器
 
-这是一个基于TextRank和TF-IDF算法的大文本摘要系统，专为中文小说等长文本设计，支持分块处理超长文本。
+TitanSummarizer是一个强大的中文小说摘要生成工具，使用最先进的Transformer深度学习模型自动生成高质量摘要。
 
 ## 功能特点
 
-- 支持超长文本的摘要生成（通过分块处理）
-- 提供TextRank和TF-IDF两种抽取式摘要算法
-- 支持单文件处理和批量处理模式
-- 自动提取文本关键词
-- 自动处理中文文本分割和分词
-- 支持多种文件编码（UTF-8、GBK、GB18030）
-- 完整的日志记录功能
+- **基于Transformer的摘要生成**：使用预训练的BART、T5等模型生成高质量摘要
+- **章节自动检测**：智能识别小说章节，支持多种章节标记格式
+- **两种摘要模式**：支持按章节摘要和全文摘要
+- **GPU加速**：支持CUDA加速，大幅提高处理速度
+- **友好的图形界面**：简洁直观的用户界面，易于操作
+- **详细的处理日志**：实时显示处理进度和结果
+- **自动保存结果**：自动保存摘要和详细信息
 
 ## 安装
 
+### 环境要求
+
+- Python 3.7+
+- PyTorch 1.7+
+- Transformers 4.0+
+- PyQt5
+
+### 安装步骤
+
+1. 克隆仓库：
 ```bash
-# 克隆仓库
 git clone https://github.com/yourusername/TitanSummarizer.git
 cd TitanSummarizer
+```
 
-# 安装依赖
+2. 安装依赖：
+```bash
 pip install -r requirements.txt
 ```
 
 ## 使用方法
 
-### 单文件处理
+### 图形界面
+
+启动图形界面：
 
 ```bash
-# 使用TextRank算法（默认）
-python titan_summarizer.py --file_path path/to/novel.txt --ratio 0.05
-
-# 使用TF-IDF算法
-python titan_summarizer.py --file_path path/to/novel.txt --ratio 0.05 --algorithm tfidf
+python transformer_ui.py
 ```
 
-### 批量处理
+界面操作：
+1. 点击"浏览..."选择小说文件
+2. 选择预训练模型
+3. 设置摘要长度
+4. 选择摘要模式（按章节或全文）
+5. 选择计算设备（CPU或GPU）
+6. 点击"开始生成摘要"
+
+### 命令行使用
+
+也可以通过命令行直接使用：
 
 ```bash
-# 批量处理目录下的所有txt文件
-python titan_summarizer.py --batch --input_dir path/to/novels --output_dir path/to/summaries --ratio 0.05
-
-# 指定文件匹配模式
-python titan_summarizer.py --batch --input_dir path/to/novels --output_dir path/to/summaries --file_pattern "novel_*.txt"
+python transformer_summarizer.py --file_path 小说文件路径 --model bart-base-chinese --by_chapter --max_summary_length 150
 ```
 
-## 参数说明
+参数说明：
+- `--file_path`：小说文件路径（必需）
+- `--model`：预训练模型，可选值：bart-base-chinese, mt5-small-chinese, cpt-base
+- `--by_chapter`：按章节生成摘要（默认为全文摘要）
+- `--max_summary_length`：摘要最大长度（默认150）
+- `--output_path`：输出文件路径（可选）
+- `--device`：计算设备，可选值：cpu, cuda
 
-- `--file_path` - 小说文件路径（单文件处理模式）
-- `--input_dir` - 输入目录（批量处理模式）
-- `--output_dir` - 输出目录（批量处理模式）
-- `--ratio` - 摘要占原文的比例，默认为0.05（5%）
-- `--algorithm` - 摘要算法，可选 "textrank" 或 "tfidf"，默认为 "textrank"
-- `--batch` - 批量处理模式
-- `--file_pattern` - 文件匹配模式，默认为 "*.txt"（批量处理模式）
+## 支持的模型
 
-## 项目结构
+目前支持以下预训练模型：
 
-- `titan_summarizer.py` - 主程序
-- `examples/` - 示例和工具
-  - `simple_chinese_summarizer.py` - 简化版中文小说摘要器
-  - `batch_summarize.py` - 批量处理脚本
-  - `fanren_sample.txt` - 《凡人修仙传》样本
-- `log/` - 日志文件目录
+- **bart-base-chinese**：中文BART模型，适合一般中文小说
+- **mt5-small-chinese**：多语言T5模型，支持中文
+- **cpt-base**：中文预训练Transformer模型
 
-## 日志功能
+## 输出文件
 
-系统会自动在`log`目录下生成日志文件，记录处理过程中的各种信息，包括：
+程序会在小说文件所在目录下创建`summaries`文件夹，并生成以下文件：
 
-- 参数设置
-- 文件读取信息
-- 关键词提取结果
-- 摘要生成过程
-- 性能统计（处理时间、压缩比等）
+- `小说名_transformer_summary.txt`：生成的摘要文本
+- `小说名_transformer_summary_detail.json`：详细的摘要信息，包括每章节的原文长度、摘要长度、压缩比等
 
 ## 示例
 
-使用TextRank算法对《凡人修仙传》样本进行摘要（比例5%）：
+以《凡人修仙传》为例：
 
 ```bash
-python titan_summarizer.py --file_path examples/fanren_sample.txt --ratio 0.05
+python transformer_summarizer.py --file_path novels/凡人修仙传_完整版.txt --model bart-base-chinese --by_chapter
 ```
 
-批量处理多个小说文件：
+## 常见问题
 
-```bash
-python titan_summarizer.py --batch --input_dir examples/novels --output_dir examples/summaries --ratio 0.05
-``` 
+**Q: 程序运行很慢怎么办？**  
+A: 建议使用GPU加速。如果没有GPU，可以选择较小的模型如mt5-small-chinese，或减少摘要长度。
+
+**Q: 如何提高摘要质量？**  
+A: 可以尝试不同的预训练模型，或调整摘要长度参数。
+
+**Q: 支持哪些文件格式？**  
+A: 目前主要支持txt文本文件，程序会自动检测文件编码。
+
+## 许可证
+
+MIT License 
