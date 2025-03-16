@@ -1,0 +1,119 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+.idea_modules/
+
+# VS Code
+.vscode/
+*.code-workspace
+.history/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 虚拟环境
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.env
+.venv
+
+# 模型文件和缓存
+*.pt
+*.pth
+*.h5
+*.ckpt
+*.bin
+*.model
+*.pkl
+*.joblib
+.cache/
+cached_*
+
+# 数据文件
+*.csv
+*.tsv
+*.json
+*.jsonl
+*.db
+*.sqlite
+*.sqlite3
+*.hdf5
+*.h5
+*.npy
+*.npz
+
+# 日志文件
+logs/
+*.log
+*.log.*
+log.txt
+
+# 摘要输出文件
+*_summary_*.txt
+
+# 临时文件
+.DS_Store
+.tmp/
+.temp/
+tmp/
+temp/
+*.swp
+*~
+
+# 大文件
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Hugging Face相关
+.huggingface/
+.transformers_cache/
+
+# NLTK数据
+nltk_data/
+
+# 其他
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/ 
