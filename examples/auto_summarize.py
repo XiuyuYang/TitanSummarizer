@@ -3,17 +3,20 @@
 
 """
 自动化摘要生成脚本
-无需每次都通过命令行控制，自动处理凡人修仙传的摘要生成
-支持批量处理多个文件，自动选择合适的算法和参数
+直接使用配置文件控制，无需命令行参数
+支持按章节总结凡人修仙传
+自动删除冗余文件和代码
 """
 
 import os
 import sys
 import time
 import logging
-import argparse
-from datetime import datetime
+import re
 import json
+import glob
+import shutil
+from datetime import datetime
 
 # 配置日志
 log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "log")
@@ -42,26 +45,21 @@ except ImportError:
 DEFAULT_CONFIG = {
     "novels_dir": "novels",
     "output_dir": "summaries",
-    "algorithms": ["textrank", "tfidf"],
+    "algorithms": ["textrank"],  # 默认只使用TextRank算法
     "default_ratio": 0.01,
     "large_file_threshold": 1000000,  # 1MB以上视为大文件
     "chunk_size": 200000,
     "max_sentences": 5000,
     "file_patterns": ["*.txt", "凡人修仙传*.txt"],
     "auto_ratio": True,  # 自动根据文件大小调整摘要比例
-    "compare_algorithms": True,  # 是否比较不同算法的结果
+    "compare_algorithms": False,  # 默认不比较不同算法
     "save_keywords": True,  # 是否保存关键词
-    "generate_report": True  # 是否生成报告
+    "generate_report": True,  # 是否生成报告
+    "by_chapter": True,  # 是否按章节总结
+    "chapter_pattern": r"第[一二三四五六七八九十百千万0-9１２３４５６７８９０]+[章回节]",  # 章节匹配模式
+    "clean_temp_files": True,  # 是否清理临时文件
+    "config_file": "config.json"  # 配置文件路径
 }
-
-def get_files_by_pattern(directory, patterns):
-    """根据模式获取文件列表"""
-    import glob
-    files = []
-    for pattern in patterns:
-        pattern_path = os.path.join(directory, pattern)
-        files.extend(glob.glob(pattern_path))
-    return files
 
 def determine_ratio(file_size):
     """根据文件大小自动确定摘要比例"""
@@ -78,6 +76,37 @@ def determine_ratio(file_size):
     else:
         return 0.1
 
+def split_by_chapters(content, chapter_pattern):
+    """按章节分割文本"""
+    # 编译正则表达式
+    pattern = re.compile(chapter_pattern)
+    
+    # 查找所有章节标题的位置
+    matches = list(pattern.finditer(content))
+    
+    if not matches:
+        logger.warning("未找到任何章节标记，将整个文本作为一个章节处理")
+        return [("全文", content)]
+    
+    # 分割章节
+    chapters = []
+    for i, match in enumerate(matches):
+        chapter_title = match.group(0)
+        start_pos = match.start()
+        
+        # 确定章节结束位置
+        if i < len(matches) - 1:
+            end_pos = matches[i + 1].start()
+        else:
+            end_pos = len(content)
+        
+        # 提取章节内容
+        chapter_content = content[start_pos:end_pos]
+        chapters.append((chapter_title, chapter_content))
+    
+    logger.info(f"成功分割出 {len(chapters)} 个章节")
+    return chapters
+
 def process_file(
     file_path, 
     output_dir, 
@@ -86,7 +115,10 @@ def process_file(
     chunk_size=200000, 
     max_sentences=5000,
     auto_ratio=True,
-    save_keywords=True
+    save_keywords=True,
+    by_chapter=True,
+    chapter_pattern=r"第[一二三四五六七八九十百千万0-9１２３４５６７８９０]+[章回节]",
+    clean_temp_files=True
 ):
     """处理单个文件的摘要生成"""
     # 确保输出目录存在
@@ -110,6 +142,7 @@ def process_file(
         ratio = DEFAULT_CONFIG["default_ratio"]
     
     # 提取关键词
+    keywords = []
     if save_keywords:
         logger.info("提取关键词...")
         keywords_start = time.time()
@@ -123,69 +156,105 @@ def process_file(
         with open(keywords_file, 'w', encoding='utf-8-sig') as f:
             f.write('\n'.join(keywords))
         logger.info(f"关键词已保存到: {keywords_file}")
-    else:
-        keywords = []
     
-    # 分块处理大文件
-    if len(content) > chunk_size:
-        logger.info(f"文件较大，将进行分块处理，每块大小: {chunk_size} 字符")
-        chunks = []
-        for i in range(0, len(content), chunk_size):
-            chunk = content[i:i+chunk_size]
-            chunks.append(chunk)
-        logger.info(f"分块完成，共 {len(chunks)} 块")
+    # 创建临时目录
+    temp_dir = os.path.join(output_dir, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # 按章节处理
+    if by_chapter:
+        logger.info("按章节处理文本...")
+        chapters = split_by_chapters(content, chapter_pattern)
         
-        # 处理每个块
-        all_summaries = []
-        for i, chunk in enumerate(chunks):
-            logger.info(f"处理第 {i+1}/{len(chunks)} 块...")
-            chunk_start = time.time()
+        # 处理每个章节
+        chapter_summaries = []
+        for i, (chapter_title, chapter_content) in enumerate(chapters):
+            logger.info(f"处理章节 {i+1}/{len(chapters)}: {chapter_title}")
             
-            # 生成摘要
-            chunk_summary = textrank_summarize(
-                chunk, 
+            # 为短章节调整摘要比例
+            chapter_ratio = min(ratio * 2, 0.2) if len(chapter_content) < 5000 else ratio
+            
+            # 生成章节摘要
+            chapter_summary = textrank_summarize(
+                chapter_content, 
+                ratio=chapter_ratio, 
+                use_textrank=(algorithm == "textrank"),
+                max_sentences=max_sentences
+            )
+            
+            # 保存章节摘要
+            chapter_file = os.path.join(temp_dir, f"{file_name}_chapter_{i+1}_{algorithm}.txt")
+            with open(chapter_file, 'w', encoding='utf-8-sig') as f:
+                f.write(f"{chapter_title}\n\n{chapter_summary}")
+            
+            # 添加到章节摘要列表
+            chapter_summaries.append(f"{chapter_title}\n\n{chapter_summary}")
+            
+            logger.info(f"章节 {i+1} 摘要完成，长度: {len(chapter_summary)} 字符")
+        
+        # 合并所有章节摘要
+        final_summary = "\n\n" + "="*50 + "\n\n".join(chapter_summaries)
+        
+    else:
+        # 分块处理大文件
+        if len(content) > chunk_size:
+            logger.info(f"文件较大，将进行分块处理，每块大小: {chunk_size} 字符")
+            chunks = []
+            for i in range(0, len(content), chunk_size):
+                chunk = content[i:i+chunk_size]
+                chunks.append(chunk)
+            logger.info(f"分块完成，共 {len(chunks)} 块")
+            
+            # 处理每个块
+            all_summaries = []
+            for i, chunk in enumerate(chunks):
+                logger.info(f"处理第 {i+1}/{len(chunks)} 块...")
+                chunk_start = time.time()
+                
+                # 生成摘要
+                chunk_summary = textrank_summarize(
+                    chunk, 
+                    ratio=ratio, 
+                    use_textrank=(algorithm == "textrank"),
+                    max_sentences=max_sentences
+                )
+                
+                chunk_time = time.time() - chunk_start
+                logger.info(f"第 {i+1} 块摘要生成完成，长度: {len(chunk_summary)} 字符，耗时: {chunk_time:.2f} 秒")
+                all_summaries.append(chunk_summary)
+                
+                # 保存当前块的摘要
+                chunk_file = os.path.join(temp_dir, f"{file_name}_chunk_{i+1}_{algorithm}.txt")
+                with open(chunk_file, 'w', encoding='utf-8-sig') as f:
+                    f.write(chunk_summary)
+            
+            # 合并所有摘要
+            final_summary = "\n\n".join(all_summaries)
+            
+            # 如果合并后的摘要太长，再次摘要
+            if len(final_summary) > chunk_size / 2:
+                logger.info(f"合并后的摘要较长 ({len(final_summary)} 字符)，进行二次摘要...")
+                second_summary_start = time.time()
+                final_summary = textrank_summarize(
+                    final_summary, 
+                    ratio=0.5,  # 二次摘要取50%
+                    use_textrank=(algorithm == "textrank"),
+                    max_sentences=max_sentences
+                )
+                second_summary_time = time.time() - second_summary_start
+                logger.info(f"二次摘要完成，长度: {len(final_summary)} 字符，耗时: {second_summary_time:.2f} 秒")
+        else:
+            # 直接处理
+            logger.info("文件大小适中，直接处理...")
+            summary_start = time.time()
+            final_summary = textrank_summarize(
+                content, 
                 ratio=ratio, 
                 use_textrank=(algorithm == "textrank"),
                 max_sentences=max_sentences
             )
-            
-            chunk_time = time.time() - chunk_start
-            logger.info(f"第 {i+1} 块摘要生成完成，长度: {len(chunk_summary)} 字符，耗时: {chunk_time:.2f} 秒")
-            all_summaries.append(chunk_summary)
-            
-            # 保存当前块的摘要
-            chunk_file = os.path.join(output_dir, f"{file_name}_chunk_{i+1}_{algorithm}.txt")
-            with open(chunk_file, 'w', encoding='utf-8-sig') as f:
-                f.write(chunk_summary)
-            logger.info(f"第 {i+1} 块摘要已保存到: {chunk_file}")
-        
-        # 合并所有摘要
-        final_summary = "\n\n".join(all_summaries)
-        
-        # 如果合并后的摘要太长，再次摘要
-        if len(final_summary) > chunk_size / 2:
-            logger.info(f"合并后的摘要较长 ({len(final_summary)} 字符)，进行二次摘要...")
-            second_summary_start = time.time()
-            final_summary = textrank_summarize(
-                final_summary, 
-                ratio=0.5,  # 二次摘要取50%
-                use_textrank=(algorithm == "textrank"),
-                max_sentences=max_sentences
-            )
-            second_summary_time = time.time() - second_summary_start
-            logger.info(f"二次摘要完成，长度: {len(final_summary)} 字符，耗时: {second_summary_time:.2f} 秒")
-    else:
-        # 直接处理
-        logger.info("文件大小适中，直接处理...")
-        summary_start = time.time()
-        final_summary = textrank_summarize(
-            content, 
-            ratio=ratio, 
-            use_textrank=(algorithm == "textrank"),
-            max_sentences=max_sentences
-        )
-        summary_time = time.time() - summary_start
-        logger.info(f"摘要生成完成，长度: {len(final_summary)} 字符，耗时: {summary_time:.2f} 秒")
+            summary_time = time.time() - summary_start
+            logger.info(f"摘要生成完成，长度: {len(final_summary)} 字符，耗时: {summary_time:.2f} 秒")
     
     # 保存最终摘要
     output_file = os.path.join(output_dir, f"{file_name}_summary_{algorithm}.txt")
@@ -207,6 +276,15 @@ def process_file(
     # 打印摘要预览
     preview_length = min(500, len(final_summary))
     logger.info(f"摘要预览: {final_summary[:preview_length]}...")
+    
+    # 清理临时文件
+    if clean_temp_files:
+        logger.info("清理临时文件...")
+        try:
+            shutil.rmtree(temp_dir)
+            logger.info("临时文件清理完成")
+        except Exception as e:
+            logger.error(f"清理临时文件失败: {e}")
     
     # 返回处理结果
     return {
@@ -287,7 +365,10 @@ def auto_summarize(config=None):
     os.makedirs(cfg["output_dir"], exist_ok=True)
     
     # 获取要处理的文件
-    files = get_files_by_pattern(cfg["novels_dir"], cfg["file_patterns"])
+    files = []
+    for pattern in cfg["file_patterns"]:
+        pattern_path = os.path.join(cfg["novels_dir"], pattern)
+        files.extend(glob.glob(pattern_path))
     
     if not files:
         logger.warning(f"在 {cfg['novels_dir']} 目录下未找到匹配的文件")
@@ -318,7 +399,10 @@ def auto_summarize(config=None):
                     chunk_size=cfg["chunk_size"],
                     max_sentences=cfg["max_sentences"],
                     auto_ratio=cfg["auto_ratio"],
-                    save_keywords=cfg["save_keywords"]
+                    save_keywords=cfg["save_keywords"],
+                    by_chapter=cfg["by_chapter"],
+                    chapter_pattern=cfg["chapter_pattern"],
+                    clean_temp_files=cfg["clean_temp_files"]
                 )
                 results.append(result)
         else:
@@ -333,7 +417,10 @@ def auto_summarize(config=None):
                 chunk_size=cfg["chunk_size"],
                 max_sentences=cfg["max_sentences"],
                 auto_ratio=cfg["auto_ratio"],
-                save_keywords=cfg["save_keywords"]
+                save_keywords=cfg["save_keywords"],
+                by_chapter=cfg["by_chapter"],
+                chapter_pattern=cfg["chapter_pattern"],
+                clean_temp_files=cfg["clean_temp_files"]
             )
             results.append(result)
     
@@ -363,61 +450,20 @@ def save_config(config, config_file):
         logger.error(f"保存配置文件失败: {e}")
         return False
 
-def main():
-    parser = argparse.ArgumentParser(description='自动摘要生成工具')
-    parser.add_argument('--config', type=str, help='配置文件路径')
-    parser.add_argument('--save-config', type=str, help='保存默认配置到指定文件')
-    parser.add_argument('--novels-dir', type=str, help='小说目录')
-    parser.add_argument('--output-dir', type=str, help='输出目录')
-    parser.add_argument('--algorithm', type=str, choices=["textrank", "tfidf", "both"], help='摘要算法')
-    parser.add_argument('--ratio', type=float, help='摘要比例')
-    parser.add_argument('--no-auto-ratio', action='store_true', help='禁用自动比例调整')
-    parser.add_argument('--chunk-size', type=int, help='分块大小')
+if __name__ == "__main__":
+    # 直接从配置文件加载配置
+    config_file = DEFAULT_CONFIG["config_file"]
     
-    args = parser.parse_args()
-    
-    # 保存默认配置
-    if args.save_config:
-        save_config(DEFAULT_CONFIG, args.save_config)
-        return
+    # 如果配置文件不存在，创建默认配置
+    if not os.path.exists(config_file):
+        logger.info(f"配置文件 {config_file} 不存在，创建默认配置")
+        save_config(DEFAULT_CONFIG, config_file)
     
     # 加载配置
-    config = None
-    if args.config:
-        config = load_config(args.config)
-        if not config:
-            logger.error("无法加载配置文件，使用默认配置")
-    
-    # 如果没有配置文件，使用命令行参数更新默认配置
+    config = load_config(config_file)
     if not config:
-        config = DEFAULT_CONFIG.copy()
-        
-        if args.novels_dir:
-            config["novels_dir"] = args.novels_dir
-        
-        if args.output_dir:
-            config["output_dir"] = args.output_dir
-        
-        if args.algorithm:
-            if args.algorithm == "both":
-                config["algorithms"] = ["textrank", "tfidf"]
-                config["compare_algorithms"] = True
-            else:
-                config["algorithms"] = [args.algorithm]
-                config["compare_algorithms"] = False
-        
-        if args.ratio:
-            config["default_ratio"] = args.ratio
-            config["auto_ratio"] = False
-        
-        if args.no_auto_ratio:
-            config["auto_ratio"] = False
-        
-        if args.chunk_size:
-            config["chunk_size"] = args.chunk_size
+        logger.warning("无法加载配置文件，使用默认配置")
+        config = DEFAULT_CONFIG
     
     # 执行自动摘要
-    auto_summarize(config)
-
-if __name__ == "__main__":
-    main() 
+    auto_summarize(config) 

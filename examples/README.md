@@ -1,4 +1,4 @@
-# 简化版中文小说摘要器
+# TitanSummarizer 中文小说摘要工具
 
 本目录包含了用于处理中文小说的简化版摘要器和相关测试文件。
 
@@ -10,6 +10,7 @@
 - `test_fanren.py` - 《凡人修仙传》测试脚本
 - `test_fanren_complete.py` - 《凡人修仙传》完整版测试脚本
 - `auto_summarize.py` - 自动摘要生成脚本
+- `batch_summarize.py` - 批量摘要生成脚本
 - `config.json` - 自动摘要生成器配置文件
 
 ## 简化版中文小说摘要器
@@ -51,6 +52,64 @@ python simple_chinese_summarizer.py --file_path novels/fanren_sample.txt --ratio
 - `--algorithm`：摘要算法，可选 "textrank" 或 "tfidf"，默认为 "textrank"
 - `--output_path`：输出文件路径（可选）
 
+## 自动摘要功能
+
+`auto_summarize.py` 是一个功能强大的自动摘要生成脚本，支持按章节处理长篇小说。
+
+### 特点
+
+- 支持按章节自动分割和摘要
+- 自动提取和保存关键词
+- 根据文件大小自动调整摘要比例
+- 生成详细的摘要报告
+- 通过配置文件控制所有参数
+
+### 使用方法
+
+```bash
+# 使用默认配置文件运行
+python auto_summarize.py
+
+# 指定配置文件
+python auto_summarize.py --config my_config.json
+```
+
+### 配置文件说明
+
+`config.json` 包含以下配置项：
+
+```json
+{
+    "novels_dir": "novels",           // 小说目录
+    "output_dir": "summaries",        // 输出目录
+    "algorithms": ["textrank"],       // 使用的算法
+    "default_ratio": 0.01,            // 默认摘要比例
+    "auto_ratio": true,               // 是否自动调整比例
+    "by_chapter": true,               // 是否按章节处理
+    "chapter_pattern": "第[一二三四五六七八九十百千万0-9１２３４５６７８９０]+[章回节]", // 章节匹配模式
+    "save_keywords": true,            // 是否保存关键词
+    "generate_report": true           // 是否生成报告
+}
+```
+
+### 输出示例
+
+摘要输出目录包含：
+- 小说摘要文件（`小说名_summary_算法.txt`）
+- 关键词文件（`小说名_keywords.txt`）
+- 摘要报告（`auto_summarize_report_日期时间.txt`）
+
+## 批量摘要功能
+
+`batch_summarize.py` 支持批量处理多个小说文件，适合大规模摘要生成。
+
+### 使用方法
+
+```bash
+# 处理指定目录下的所有小说
+python batch_summarize.py --input_dir novels --output_dir summaries
+```
+
 ## 完整版摘要器
 
 `chinese_novel_test.py` 是完整版摘要器，支持多种摘要策略，但需要 PyTorch。
@@ -85,101 +144,6 @@ python test_fanren_complete.py --ratio 0.005 --algorithm tfidf --chunk_size 2000
 - `--algorithm`：摘要算法，可选 "textrank" 或 "tfidf"，默认为 "textrank"
 - `--chunk_size`：分块大小（字符数），默认为 100000
 - `--max_sentences`：每块最大句子数，默认为 5000
-
-## 自动摘要生成器
-
-`auto_summarize.py` 是一个自动化摘要生成工具，无需每次都通过命令行控制参数，可以自动处理多个文件并选择合适的算法和参数。
-
-### 特点
-
-- 自动批量处理多个文件
-- 根据文件大小自动调整摘要比例
-- 支持同时使用多种算法并比较结果
-- 自动生成详细的摘要报告
-- 支持通过配置文件自定义处理参数
-
-### 使用方法
-
-基本用法（使用默认配置）：
-
-```bash
-python auto_summarize.py
-```
-
-使用配置文件：
-
-```bash
-python auto_summarize.py --config config.json
-```
-
-保存默认配置到文件：
-
-```bash
-python auto_summarize.py --save-config my_config.json
-```
-
-指定小说目录和输出目录：
-
-```bash
-python auto_summarize.py --novels-dir my_novels --output-dir my_summaries
-```
-
-只使用特定算法：
-
-```bash
-python auto_summarize.py --algorithm textrank
-```
-
-使用两种算法并比较：
-
-```bash
-python auto_summarize.py --algorithm both
-```
-
-指定固定摘要比例（禁用自动比例）：
-
-```bash
-python auto_summarize.py --ratio 0.01 --no-auto-ratio
-```
-
-### 配置文件说明
-
-配置文件使用 JSON 格式，包含以下字段：
-
-```json
-{
-    "novels_dir": "novels",             // 小说目录
-    "output_dir": "summaries",          // 输出目录
-    "algorithms": ["textrank", "tfidf"], // 使用的算法
-    "default_ratio": 0.01,              // 默认摘要比例
-    "large_file_threshold": 1000000,    // 大文件阈值（字节）
-    "chunk_size": 200000,               // 分块大小（字符）
-    "max_sentences": 5000,              // 每块最大句子数
-    "file_patterns": ["*.txt"],         // 文件匹配模式
-    "auto_ratio": true,                 // 是否自动调整比例
-    "compare_algorithms": true,         // 是否比较算法
-    "save_keywords": true,              // 是否保存关键词
-    "generate_report": true             // 是否生成报告
-}
-```
-
-### 性能比较
-
-在处理完整版《凡人修仙传》（约 6.5MB 文本）时：
-
-- TextRank 算法：
-  - 处理时间：约 105 秒
-  - 压缩比：0.50%
-  - 摘要大小：约 32KB
-  - 处理速度：约 62,679 字符/秒
-
-- TF-IDF 算法：
-  - 处理时间：约 59 秒
-  - 压缩比：1.43%
-  - 摘要大小：约 94KB
-  - 处理速度：约 110,838 字符/秒
-
-TF-IDF 算法处理速度更快，但生成的摘要更长；TextRank 算法生成的摘要更简洁，但处理时间更长。
 
 ## 示例结果
 
