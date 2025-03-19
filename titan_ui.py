@@ -2,32 +2,73 @@
 # -*- coding: utf-8 -*-
 
 """
-TitanSummarizer UI - 大文本摘要系统界面
+TitanSummarizer - 用户界面
+支持中文小说等长文本的摘要生成
 """
 
+import os
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import threading
-import queue
-import re
-from pathlib import Path
-from titan_summarizer import TitanSummarizer, MODELS
-import torch
-import json
-import os
-import logging
 import time
+import logging
+import torch
+from pathlib import Path
+import datetime
+import re
+import json
+import traceback
+
+# 导入辅助函数模块
+from get_model_name import get_model_name, get_model_display_name, get_folder_size, get_readable_size
+
+# 导入摘要生成器
+try:
+    from titan_summarizer import TitanSummarizer
+except ImportError:
+    print("警告: 找不到titan_summarizer模块，模型加载功能可能不可用")
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("titan_ui.log", mode="w", encoding="utf-8")
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("TitanUI")
+
+# 创建进度专用日志器
+progress_logger = logging.getLogger("progress")
+progress_logger.setLevel(logging.INFO)
+
+# 全局变量，用于保存加载窗口的引用
+loading_window = None
+
+# 创建专门的进度条日志记录器
+progress_logger = logging.getLogger("progress_logger")
+progress_logger.setLevel(logging.DEBUG)
+
+# 确保logs目录存在
+if not os.path.exists("logs"):
+    os.makedirs("logs")
+
+# 创建带时间戳的日志文件名
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+progress_log_file = f"logs/progress_{timestamp}.log"
+
+# 添加文件处理器
+progress_file_handler = logging.FileHandler(progress_log_file, encoding="utf-8")
+progress_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+progress_logger.addHandler(progress_file_handler)
+
+# 确保不会传递到父级logger
+progress_logger.propagate = False
+
+# 记录初始日志
+progress_logger.info(f"===== 进度条日志开始记录 =====")
+progress_logger.info(f"日志文件: {progress_log_file}")
+
+# 使用从get_model_name模块导入的函数
 
 class SettingsWindow:
     def __init__(self, parent, settings):
@@ -71,10 +112,11 @@ class SettingsWindow:
         
         ttk.Label(model_frame, text="默认模型:").grid(row=0, column=0, sticky=tk.W)
         self.model_var = tk.StringVar(value=self.settings.get("default_model", "1.5B"))
+        model_options = ["small", "medium", "large", "1.5B", "6B", "7B", "13B"]  # 使用固定的选项列表
         model_combo = ttk.Combobox(
             model_frame,
             textvariable=self.model_var,
-            values=list(MODELS.keys()),
+            values=model_options,
             state="readonly",
             width=30
         )
@@ -341,300 +383,358 @@ class ChapterListWindow:
             callback(selected)
             self.refresh_chapters()
 
-class LoadingWindow:
-    def __init__(self, parent):
-        self.window = tk.Toplevel(parent)
-        self.window.title("模型加载中")
-        self.window.geometry("500x350")  # 增加窗口高度
-        self.window.resizable(False, False)
-        self.window.transient(parent)
-        self.window.grab_set()
+class StdoutRedirector:
+    """用于重定向标准输出到Tkinter窗口"""
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+        self.buffer = ""
+        self.line_buffer = []
+        # 保存原始stdout便于调试输出
+        self.original_stdout = sys.stdout
         
-        # 设置窗口样式
-        self.window.configure(bg='#f0f0f0')
+    def write(self, string):
+        # 同时输出到原始stdout，便于命令行调试
+        self.original_stdout.write(string)
+        self.original_stdout.flush()
         
-        # 创建主框架
-        main_frame = ttk.Frame(self.window, padding="10")  # 减小内边距
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # 将输入添加到缓冲区
+        self.buffer += string
         
-        # 创建进度区域框架 - 将所有进度相关元素组合在一起
-        progress_frame = ttk.LabelFrame(main_frame, text="加载进度", padding="5")
-        progress_frame.pack(fill=tk.X, pady=(0, 5))  # 减小底部间距
-        
-        # 总进度框架
-        total_progress_frame = ttk.Frame(progress_frame)
-        total_progress_frame.pack(fill=tk.X)
-        
-        # 总进度标签和进度条
-        ttk.Label(
-            total_progress_frame,
-            text="总体进度:",
-            font=('Microsoft YaHei UI', 9),
-            width=10
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        
-        progress_bar_frame = ttk.Frame(total_progress_frame)
-        progress_bar_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        self.progress_var = tk.DoubleVar()
-        self.progress = ttk.Progressbar(
-            progress_bar_frame,
-            variable=self.progress_var,
-            maximum=100,
-            mode='determinate',
-            length=350  # 减小进度条长度
-        )
-        self.progress.pack(fill=tk.X)
-        
-        # 百分比标签
-        self.percent_label = ttk.Label(
-            total_progress_frame,
-            text="0%",
-            font=('Microsoft YaHei UI', 9),
-            width=5,
-            anchor='e'
-        )
-        self.percent_label.pack(side=tk.LEFT, padx=(5, 0))
-        
-        # 状态标签
-        status_frame = ttk.Frame(progress_frame)
-        status_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        ttk.Label(
-            status_frame,
-            text="状态:",
-            font=('Microsoft YaHei UI', 9),
-            width=10
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.status_label = ttk.Label(
-            status_frame,
-            text="正在初始化...",
-            font=('Microsoft YaHei UI', 9),
-            wraplength=380
-        )
-        self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # 文件进度框架
-        file_progress_frame = ttk.Frame(progress_frame)
-        file_progress_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        ttk.Label(
-            file_progress_frame,
-            text="文件进度:",
-            font=('Microsoft YaHei UI', 9),
-            width=10
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        
-        file_bar_frame = ttk.Frame(file_progress_frame)
-        file_bar_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        self.file_progress_var = tk.DoubleVar()
-        self.file_progress = ttk.Progressbar(
-            file_bar_frame,
-            variable=self.file_progress_var,
-            maximum=100,
-            mode='determinate',
-            length=350  # 减小进度条长度
-        )
-        self.file_progress.pack(fill=tk.X)
-        
-        # 文件百分比标签
-        self.file_percent_label = ttk.Label(
-            file_progress_frame,
-            text="0%",
-            font=('Microsoft YaHei UI', 9),
-            width=5,
-            anchor='e'
-        )
-        self.file_percent_label.pack(side=tk.LEFT, padx=(5, 0))
-        
-        # 详细信息区域
-        details_frame = ttk.LabelFrame(main_frame, text="详细信息", padding="5")
-        details_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        self.detail_label = ttk.Label(
-            details_frame,
-            text="准备下载模型文件...",
-            font=('Microsoft YaHei UI', 9),
-            foreground="#333333",
-            wraplength=460,
-            justify=tk.LEFT
-        )
-        self.detail_label.pack(fill=tk.X, expand=True, pady=(2, 2))
-        
-        # 日志框架 - 分配更多空间
-        log_frame = ttk.LabelFrame(main_frame, text="加载日志", padding="5")
-        log_frame.pack(fill=tk.BOTH, expand=True)
-        
-        self.log_text = scrolledtext.ScrolledText(
-            log_frame,
-            height=12,  # 增加日志区域高度
-            font=('Consolas', 9),
-            wrap=tk.WORD
-        )
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-        self.log_text.config(state=tk.DISABLED)
-        
-        # 添加不同日志级别的标签颜色
-        self.log_tags = {
-            "INFO": "blue",
-            "WARNING": "orange",
-            "ERROR": "red",
-            "DEBUG": "gray",
-            "CRITICAL": "purple"
-        }
-        
-        for tag, color in self.log_tags.items():
-            self.log_text.tag_config(tag, foreground=color)
-        
-        # 取消按钮 - 移至底部
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        self.cancel_button = ttk.Button(
-            button_frame,
-            text="取消",
-            command=self.cancel_loading
-        )
-        self.cancel_button.pack(side=tk.RIGHT)
-        
-        self.cancelled = False
-        logger.info("加载窗口已初始化")
-        
-    def winfo_exists(self):
-        """检查窗口是否存在"""
-        try:
-            return self.window.winfo_exists()
-        except:
-            return False
-        
-    def destroy(self):
-        """销毁窗口"""
-        try:
-            if self.winfo_exists():
-                self.window.destroy()
-        except Exception as e:
-            logger.error(f"销毁加载窗口失败: {str(e)}")
-        
-    def update_progress(self, percentage: int, message: str, file_percentage=None, file_detail=None):
-        """更新进度和状态信息"""
-        if not self.cancelled and self.window.winfo_exists():
-            self.progress_var.set(percentage)
-            self.percent_label.config(text=f"{percentage}%")
-            self.status_label.config(text=message)
-            
-            # 更新文件进度（如果提供）
-            if file_percentage is not None:
-                self.file_progress_var.set(file_percentage)
-                self.file_percent_label.config(text=f"{file_percentage}%")
+        # 处理换行或回车
+        if '\n' in self.buffer or '\r' in self.buffer:
+            # 如果包含回车符，可能是进度条更新
+            if '\r' in self.buffer and '|' in self.buffer and '%' in self.buffer:
+                # 提取最后一个进度条行
+                lines = self.buffer.split('\r')
+                progress_line = lines[-1].strip()
                 
-            if file_detail:
-                self.detail_label.config(text=file_detail)
+                if progress_line:
+                    # 过滤掉不完整的行
+                    if self._is_progress_bar(progress_line):
+                        # 发送到UI
+                        self._update_ui_with_progress(progress_line)
+                        
+                # 保留最后一行为缓冲区
+                self.buffer = progress_line if progress_line else ""
+            else:
+                # 正常的换行处理
+                lines = self.buffer.split('\n')
+                # 保留最后一个可能不完整的行
+                self.buffer = lines[-1]
                 
-            self.window.update_idletasks()
-        
-    def update_detail(self, message: str):
-        """更新详细信息"""
-        if not self.cancelled and self.window.winfo_exists():
-            self.detail_label.config(text=message)
-            self.window.update_idletasks()
-        
-    def add_log(self, message: str):
-        """添加日志消息"""
-        if not self.cancelled and self.window.winfo_exists():
-            current_time = time.strftime("%H:%M:%S", time.localtime())
-            
-            # 提取文件下载进度信息
-            file_percentage = None
-            file_name = ""
-            size_info = ""
-            
-            # 处理Hugging Face下载信息格式
-            if "Downloading" in message:
-                try:
-                    # 从日志中提取文件名
-                    if ":" in message:
-                        file_parts = message.split(":")
-                        if len(file_parts) > 1:
-                            file_name = file_parts[0].split("Downloading")[-1].strip()
-                    else:
-                        # 尝试其他格式提取文件名
-                        file_name_match = re.search(r"Downloading (.*)", message)
-                        if file_name_match:
-                            file_name = file_name_match.group(1).strip()
-                    
-                    # 提取进度百分比
-                    if "[" in message and "]" in message:
-                        percentage_str = message.split("[")[-1].split("]")[0].strip()
-                        if "%" in percentage_str:
-                            file_percentage = float(percentage_str.strip("%"))
-                    
-                    # 提取大小信息
-                    if "]" in message:
-                        size_part = message.split("]")[-1].strip()
-                        if "/" in size_part:
-                            size_info = size_part.strip()
-                    
-                    # 构造详细信息
-                    detail_text = f"正在下载: {file_name}"
-                    if size_info:
-                        detail_text += f" ({size_info})"
-                    
-                    # 更新详细信息标签和文件进度
-                    if file_name:
-                        self.detail_label.config(text=detail_text)
-                    
-                    if file_percentage is not None:
-                        self.file_progress_var.set(file_percentage)
-                        self.file_percent_label.config(text=f"{file_percentage:.1f}%")
+                # 处理完整的行
+                for line in lines[:-1]:
+                    if line.strip():  # 忽略空行
+                        self._update_ui_with_text(line)
                         
-                except Exception as e:
-                    logger.error(f"解析下载进度失败: {str(e)}")
+    def _update_ui_with_progress(self, progress_line):
+        """更新UI显示进度条"""
+        try:
+            self.text_widget.config(state=tk.NORMAL)
             
-            # 处理loading file信息
-            elif "loading file" in message and "from cache" in message:
-                try:
-                    # 提取文件名
-                    file_parts = message.split("loading file")
-                    if len(file_parts) > 1:
-                        file_name = file_parts[1].split("from cache")[0].strip()
-                        
-                        # 更新详细信息标签
-                        self.detail_label.config(text=f"正在加载缓存文件: {file_name}")
-                except Exception as e:
-                    logger.error(f"解析加载信息失败: {str(e)}")
+            # 尝试找到并替换最后一个进度条行
+            found = False
+            progress_line_index = 0
             
-            # 查找日志级别标签
-            log_level = "INFO"  # 默认级别
-            for level in self.log_tags.keys():
-                if f"[{level}]" in message:
-                    log_level = level
+            # 检查是否有存在的进度条行
+            for i in range(10):
+                tag_name = f"progress_line_{i}"
+                line_ranges = self.text_widget.tag_ranges(tag_name)
+                if line_ranges:
+                    # 替换已有的进度条行
+                    self.text_widget.delete(line_ranges[0], line_ranges[1])
+                    self.text_widget.insert(line_ranges[0], progress_line, (tag_name, "progress"))
+                    found = True
+                    progress_line_index = i
                     break
             
-            # 启用编辑
+            if not found:
+                # 如果没有找到进度条行，添加新行
+                progress_line_index = 0
+                current_end = self.text_widget.index(tk.END)
+                line_start = f"{float(current_end) - 0.1}"
+                tag_name = f"progress_line_{progress_line_index}"
+                self.text_widget.insert(tk.END, progress_line + "\n", (tag_name, "progress"))
+            
+            # 尝试提取进度百分比
+            self._extract_and_update_progress(progress_line)
+            
+            # 确保进度条行可见
+            self.text_widget.see(tk.END)
+            self.text_widget.config(state=tk.DISABLED)
+            self.text_widget.update_idletasks()
+        except Exception as e:
+            self.original_stdout.write(f"更新进度条失败: {e}\n")
+            
+    def _update_ui_with_text(self, text):
+        """更新UI显示普通文本"""
+        try:
+            # 添加到窗口
+            self.text_widget.config(state=tk.NORMAL)
+            
+            # 确定文本类型
+            tag = "info"
+            if "error" in text.lower() or "失败" in text:
+                tag = "error"
+            elif "warning" in text.lower() or "警告" in text:
+                tag = "warning"
+            elif "success" in text.lower() or "成功" in text:
+                tag = "success"
+            elif self._is_progress_bar(text):
+                tag = "progress"
+                # 尝试提取进度百分比
+                self._extract_and_update_progress(text)
+            
+            # 添加文本
+            self.text_widget.insert(tk.END, text + "\n", tag)
+            
+            # 滚动到底部并更新UI
+            self.text_widget.see(tk.END)
+            self.text_widget.config(state=tk.DISABLED)
+            self.text_widget.update_idletasks()
+        except Exception as e:
+            self.original_stdout.write(f"更新文本失败: {e}\n")
+            
+    def _extract_and_update_progress(self, text):
+        """从进度条文本中提取百分比并更新进度条"""
+        try:
+            # 查找窗口引用
+            window = self.text_widget.master
+            while not isinstance(window, LoadingWindow) and hasattr(window, 'master'):
+                window = window.master
+                
+            if isinstance(window, LoadingWindow):
+                # 尝试提取百分比
+                if '%' in text:
+                    parts = text.split('%', 1)[0].split()
+                    for part in reversed(parts):
+                        try:
+                            # 尝试将部分转换为浮点数
+                            percent = float(part)
+                            if 0 <= percent <= 100:
+                                window.update_progress(percent / 100.0)
+                                break
+                        except ValueError:
+                            continue
+        except Exception as e:
+            self.original_stdout.write(f"提取进度百分比失败: {e}\n")
+                    
+    def flush(self):
+        # 刷新原始stdout
+        self.original_stdout.flush()
+        
+        # 处理缓冲区中的剩余内容
+        if self.buffer:
+            if self._is_progress_bar(self.buffer):
+                self._update_ui_with_progress(self.buffer)
+            else:
+                self._update_ui_with_text(self.buffer)
+            self.buffer = ""
+                
+    def _is_progress_bar(self, text):
+        """检查文本是否是进度条"""
+        return "%" in text and ("|" in text or "bar" in text.lower())
+
+class LoadingWindow:
+    def __init__(self, parent):
+        """初始化加载窗口"""
+        self.parent = parent
+        self.window = tk.Toplevel(parent)
+        self.window.title("模型加载中")
+        self.window.geometry("800x600")
+        self.window.resizable(True, True)
+        
+        # 窗口居中
+        self.window.update_idletasks()
+        window_width = self.window.winfo_width()
+        window_height = self.window.winfo_height()
+        screen_width = self.window.winfo_screenwidth()
+        screen_height = self.window.winfo_screenheight()
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.window.geometry(f"+{x}+{y}")
+        
+        # 创建主框架
+        main_frame = ttk.Frame(self.window, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 标题
+        title_label = ttk.Label(main_frame, text="正在加载模型", font=("TkDefaultFont", 14, "bold"))
+        title_label.pack(pady=(0, 10))
+        
+        # 状态信息
+        self.status_label = ttk.Label(main_frame, text="正在准备下载模型...")
+        self.status_label.pack(pady=(0, 5))
+        
+        # 模型路径信息
+        models_dir = os.path.join(os.getcwd(), "models")
+        path_frame = ttk.Frame(main_frame)
+        path_frame.pack(fill=tk.X, pady=(0, 5))
+        path_label = ttk.Label(path_frame, text="模型存储路径:")
+        path_label.pack(side=tk.LEFT)
+        path_value = ttk.Label(path_frame, text=models_dir)
+        path_value.pack(side=tk.LEFT, padx=(5, 0))
+        
+        # 进度条框架
+        progress_frame = ttk.Frame(main_frame)
+        progress_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # 进度条
+        self.progress_bar = ttk.Progressbar(progress_frame, length=100, mode='determinate')
+        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # 进度百分比标签
+        self.progress_label = ttk.Label(progress_frame, text="0%")
+        self.progress_label.pack(side=tk.LEFT, padx=(5, 0))
+        
+        # 日志显示区域
+        log_frame = ttk.LabelFrame(main_frame, text="日志输出")
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        # 使用等宽字体显示日志，以确保进度条正确显示
+        self.log_text = tk.Text(log_frame, wrap=tk.WORD, height=20, font=('Courier New', 10))
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.log_text.tag_configure("info", foreground="black")
+        self.log_text.tag_configure("warning", foreground="orange")
+        self.log_text.tag_configure("error", foreground="red")
+        self.log_text.tag_configure("success", foreground="green")
+        self.log_text.tag_configure("progress", foreground="blue")
+        
+        # 添加进度条专用标签
+        for i in range(10):
+            tag_name = f"progress_line_{i}"
+            self.log_text.tag_configure(tag_name, foreground="blue", font=('Courier New', 10))
+        
+        # 滚动条
+        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.config(yscrollcommand=scrollbar.set)
+        
+        # 按钮框架
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        # 取消按钮
+        self.cancel_button = ttk.Button(button_frame, text="取消", command=self.cancel)
+        self.cancel_button.pack(pady=5)
+        
+        # 初始化取消标志
+        self.cancelled = False
+        
+        # 创建标准输出重定向器
+        self.stdout_redirector = StdoutRedirector(self.log_text)
+        
+    def add_log(self, message, level="info"):
+        """添加日志到日志显示区域"""
+        if not hasattr(self, 'log_text'):
+            return
+            
+        try:
+            # 清除结尾的\r和\r\n，保持消息整洁
+            while message.endswith('\r') or message.endswith('\n'):
+                message = message.rstrip('\r\n')
+                
+            # 如果消息为空，不处理
+            if not message:
+                return
+                
             self.log_text.config(state=tk.NORMAL)
             
-            # 添加带时间戳的日志条目
-            self.log_text.insert(tk.END, f"[{current_time}] ", "")
-            self.log_text.insert(tk.END, f"{message}\n", log_level)
+            # 检查是否是进度条消息
+            is_progress_bar = ("%" in message and 
+                              ("|" in message or "bar" in message.lower()) and 
+                              "[" in message and 
+                              "]" in message)
             
-            # 滚动到底部
+            if is_progress_bar:
+                # 尝试找到消息中的最后一行(可能包含\r)
+                if '\r' in message:
+                    message = message.split('\r')[-1]
+                
+                # 对于进度条消息，使用等宽字体显示
+                self.log_text.insert(tk.END, message + "\n", "progress")
+                
+                # 尝试提取进度百分比
+                try:
+                    percent_part = message.split("%")[0]
+                    # 取最后一个数字作为百分比
+                    for word in reversed(percent_part.split()):
+                        if word.replace('.', '', 1).isdigit() and word.count('.') <= 1:
+                            percent = float(word)
+                            self.update_progress(percent / 100.0)
+                            break
+                except Exception:
+                    pass
+            else:
+                # 普通日志消息
+                self.log_text.insert(tk.END, message + "\n", level)
+            
             self.log_text.see(tk.END)
-            
-            # 禁用编辑
             self.log_text.config(state=tk.DISABLED)
             
-            # 更新UI
+            # 同时打印到控制台以便调试
+            print(f"[UI日志-{level}] {message}")
+            
+            # 更新UI响应
             self.window.update_idletasks()
-        
-    def cancel_loading(self):
+        except Exception as e:
+            print(f"添加日志出错: {e}")
+            
+    def update_progress(self, progress):
+        """更新进度条"""
+        try:
+            # 确保进度值在0-1之间
+            progress = max(0.0, min(1.0, progress))
+            progress_percent = int(progress * 100)
+            
+            self.progress_bar['value'] = progress_percent
+            self.progress_label.config(text=f"{progress_percent}%")
+            
+            # 更新状态文本
+            if progress < 0.3:
+                self.status_label.config(text="正在准备模型...")
+            elif progress < 0.6:
+                self.status_label.config(text="正在下载模型文件...")
+            elif progress < 0.9:
+                self.status_label.config(text="正在加载模型...")
+            else:
+                self.status_label.config(text="模型加载完成")
+                
+            self.window.update_idletasks()
+        except Exception as e:
+            print(f"更新进度条出错: {e}")
+    
+    def cancel(self):
         """取消加载"""
-        if not self.cancelled:
+        try:
+            # 设置取消标志
             self.cancelled = True
-            self.add_log("[WARNING] 用户取消加载")
-            logger.warning("用户取消加载模型")
+            self.add_log("用户取消模型加载", "warning")
+            
+            # 禁用取消按钮，防止重复点击
+            self.cancel_button.config(state=tk.DISABLED)
+            
+            # 更新状态信息
+            self.status_label.config(text="正在取消操作...")
+            
+            # 立即关闭窗口
+            self.window.after(500, self.close)
+        except Exception as e:
+            print(f"取消操作失败: {e}")
+            # 尝试直接关闭
+            self.close()
+        
+    def close(self):
+        """关闭窗口"""
+        try:
+            # 确保恢复原始标准输出
+            if hasattr(self, 'stdout_redirector') and hasattr(self.stdout_redirector, 'original_stdout'):
+                sys.stdout = self.stdout_redirector.original_stdout
+                
+            # 销毁窗口
             self.window.destroy()
+        except Exception as e:
+            print(f"关闭窗口出错: {e}")
 
 class TitanUI:
     def __init__(self, root):
@@ -749,10 +849,11 @@ class TitanUI:
         # 模型选择
         ttk.Label(control_frame, text="模型:").pack(side=tk.LEFT, padx=5)
         self.model_var = tk.StringVar(value=self.settings.get("default_model", "1.5B"))
+        model_options = ["small", "medium", "large", "1.5B", "6B", "7B", "13B"]  # 使用固定的选项列表
         model_combo = ttk.Combobox(
             control_frame,
             textvariable=self.model_var,
-            values=list(MODELS.keys()),
+            values=model_options,
             state="readonly",
             width=20
         )
@@ -760,7 +861,7 @@ class TitanUI:
         
         # 设备选择
         ttk.Label(control_frame, text="设备:").pack(side=tk.LEFT, padx=5)
-        self.device_var = tk.StringVar(value=self.settings.get("default_device", "GPU" if torch.cuda.is_available() else "CPU"))
+        self.device_var = tk.StringVar(value=self.settings.get("default_device", "GPU"))
         device_combo = ttk.Combobox(
             control_frame,
             textvariable=self.device_var,
@@ -880,12 +981,31 @@ class TitanUI:
         )
         self.summary_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-    def update_button_states(self):
-        """更新按钮状态"""
-        model_loaded = self.summarizer is not None
-        self.generate_button.state(['disabled'] if not model_loaded else ['!disabled'])
-        self.translate_button.state(['disabled'] if not model_loaded else ['!disabled'])
-        
+    def update_button_states(self, enable=True):
+        """更新界面按钮状态"""
+        try:
+            # 更新生成摘要按钮状态
+            if hasattr(self, "generate_button"):
+                if enable and self.summarizer:
+                    self.generate_button.config(state=tk.NORMAL)
+                else:
+                    self.generate_button.config(state=tk.DISABLED)
+                    
+            # 更新翻译按钮状态
+            if hasattr(self, "translate_button"):
+                if enable and self.summarizer:
+                    self.translate_button.config(state=tk.NORMAL)
+                else:
+                    self.translate_button.config(state=tk.DISABLED)
+                    
+            # 更新加载按钮状态 - 总是可用
+            if hasattr(self, "load_button"):
+                self.load_button.config(state=tk.NORMAL)
+                
+            logger.debug(f"按钮状态已更新: enable={enable}")
+        except Exception as e:
+            logger.error(f"更新按钮状态失败: {str(e)}")
+
     def get_novel_files(self):
         """获取novels目录中的所有小说文件"""
         novel_files = []
@@ -1013,158 +1133,134 @@ class TitanUI:
             logger.error(f"加载小说失败: {str(e)}", exc_info=True)
         
     def load_model(self):
-        """加载语言模型"""
+        """加载模型"""
         try:
-            # 添加日志处理器，将模型加载日志发送到UI
-            class UILogHandler(logging.Handler):
-                def __init__(self, ui_callback):
-                    super().__init__()
-                    self.ui_callback = ui_callback
-                    
-                def emit(self, record):
-                    try:
-                        msg = self.format(record)
-                        # 在UI线程中更新日志
-                        self.ui_callback(record.levelname, msg)
-                    except Exception as e:
-                        print(f"UI日志处理器错误: {e}")
+            # 获取模型大小和设备设置
+            model_size = self.model_var.get()
+            device = "cuda" if self.device_var.get() == "GPU" and torch.cuda.is_available() else "cpu"
             
-            # 显示加载窗口
+            # 创建加载窗口
             loading_window = LoadingWindow(self.root)
             
-            # 添加日志到UI的函数
-            def add_log_to_ui(level, msg):
-                if loading_window.winfo_exists():
-                    loading_window.add_log(f"[{level}] {msg}")
-            
-            # 为模型加载器设置日志处理器
-            model_logger = logging.getLogger("titan_summarizer")
-            ui_handler = UILogHandler(add_log_to_ui)
-            ui_handler.setLevel(logging.INFO)
-            ui_handler.setFormatter(logging.Formatter('%(message)s'))
-            model_logger.addHandler(ui_handler)
-            
-            # 添加transformers的日志处理器
-            transformers_logger = logging.getLogger("transformers.modeling_utils")
-            transformers_logger.addHandler(ui_handler)
-            tokenizer_logger = logging.getLogger("transformers.tokenization_utils_base")
-            tokenizer_logger.addHandler(ui_handler)
-            
-            # 进度回调函数
-            def progress_callback(progress, message, file_percentage=None):
-                if loading_window.winfo_exists():
-                    try:
-                        # 总体进度处理
-                        percentage = int(progress * 100)
-                        loading_window.progress_var.set(percentage)
-                        loading_window.percent_label.config(text=f"{percentage}%")
-                        loading_window.status_label.config(text=message)
-                        
-                        # 文件进度处理 - 确保正确更新
-                        if file_percentage is not None:
-                            try:
-                                # 确保文件百分比是浮点数并四舍五入为整数
-                                fp = round(float(file_percentage))
-                                
-                                # 记录到日志
-                                logger.debug(f"文件进度更新: {fp}%, 消息: {message}")
-                                
-                                # 直接更新文件进度条
-                                loading_window.file_progress_var.set(fp)
-                                loading_window.file_percent_label.config(text=f"{fp}%")
-                                
-                                # 如果包含文件名信息，更新详细信息标签
-                                if "下载" in message and ":" in message:
-                                    file_parts = message.split(":")
-                                    if len(file_parts) >= 2:
-                                        file_name = file_parts[0].split("下载")[-1].strip()
-                                        detail = f"正在下载: {file_name}"
-                                        
-                                        # 查找大小信息
-                                        if "/" in message:
-                                            size_parts = message.split(":")
-                                            if len(size_parts) >= 2:
-                                                size_info = size_parts[1].strip()
-                                                detail += f" ({size_info})"
-                                                
-                                        loading_window.detail_label.config(text=detail)
-                            except Exception as e:
-                                logger.error(f"处理文件进度失败: {str(e)}, 原始值: {file_percentage}")
-                        
-                        # 强制更新UI
-                        loading_window.window.update_idletasks()
-                    except Exception as e:
-                        logger.error(f"更新进度UI失败: {str(e)}")
-            
-            # 显示初始化消息
-            loading_window.update_progress(0, "正在初始化模型加载...")
-            loading_window.add_log("[INFO] 开始加载模型...")
-            
-            # 创建后台任务加载模型
-            def load_model_task():
-                try:
-                    # 记录开始时间
-                    start_time = time.time()
-                    
-                    # 初始化模型
-                    model_size = self.model_var.get()  # 使用UI中选择的模型大小
-                    device = "cuda" if self.device_var.get() == "GPU" and torch.cuda.is_available() else "cpu"
-                    loading_window.add_log(f"[INFO] 使用设备: {device}")
-                    loading_window.add_log(f"[INFO] 模型大小: {model_size}")
-                    
-                    self.summarizer = TitanSummarizer(
-                        model_size=model_size,
-                        device=device,
-                        progress_callback=progress_callback
-                    )
-                    
-                    # 记录完成时间
-                    elapsed_time = time.time() - start_time
-                    loading_window.add_log(f"[INFO] 模型加载完成，耗时: {elapsed_time:.2f}秒")
-                    loading_window.update_progress(100, "模型加载完成!", 100)
-                    
-                    # 稍作延迟后关闭加载窗口
-                    time.sleep(1)
-                    if loading_window.winfo_exists():
-                        loading_window.destroy()
-                    
-                    # 更新UI状态
-                    self.root.after(0, lambda: self.update_status("模型加载完成"))
-                    self.root.after(0, self.update_button_states)
-                except Exception as e:
-                    error_msg = f"模型加载失败: {str(e)}"
-                    self.logger.error(error_msg)
-                    
-                    if loading_window.winfo_exists():
-                        loading_window.add_log(f"[ERROR] {error_msg}")
-                        loading_window.update_progress(0, "模型加载失败!", 0)
-                        # 稍作延迟后关闭加载窗口
-                        time.sleep(3)
-                        loading_window.destroy()
-                    
-                    # 更新UI状态
-                    self.root.after(0, lambda: self.update_status(error_msg))
-                finally:
-                    # 移除UI日志处理器
-                    model_logger.removeHandler(ui_handler)
-                    transformers_logger.removeHandler(ui_handler)
-                    tokenizer_logger.removeHandler(ui_handler)
-            
-            # 启动后台线程
-            threading.Thread(target=load_model_task, daemon=True).start()
+            # 启动后台线程加载模型
+            threading.Thread(
+                target=self.load_model_task, 
+                args=(loading_window, model_size, device), 
+                daemon=True
+            ).start()
             
         except Exception as e:
-            error_msg = f"启动模型加载失败: {str(e)}"
-            self.logger.error(error_msg)
-            self.update_status(error_msg)
-            
-            # 如果加载窗口还存在，关闭它
-            try:
-                if 'loading_window' in locals() and loading_window.winfo_exists():
-                    loading_window.destroy()
-            except:
-                pass
+            self.logger.error(f"加载模型时发生错误: {str(e)}")
+            messagebox.showerror("错误", f"加载模型失败: {str(e)}")
+    
+    def load_model_task(self, loading_window, model_size, device):
+        """在后台线程中加载模型的任务"""
+        # 保存原始标准输出
+        original_stdout = sys.stdout
         
+        try:
+            # 重定向标准输出到UI
+            sys.stdout = loading_window.stdout_redirector
+            
+            # 添加初始日志
+            loading_window.add_log("开始加载模型...", "info")
+            loading_window.add_log(f"模型规格: {model_size}", "info")
+            loading_window.add_log(f"设备: {device}", "info")
+            
+            # 显示模型将下载到的路径
+            models_dir = os.path.join(os.getcwd(), "models")
+            loading_window.add_log(f"模型将下载到: {models_dir}", "info")
+            
+            # 创建progress_callback函数来更新UI
+            def progress_callback(progress, message, file_progress=None):
+                # 检查是否取消 - 如果取消了立即返回True
+                if loading_window.cancelled:
+                    loading_window.add_log("检测到取消请求，停止模型加载", "warning")
+                    return True  # 返回True以通知TitanSummarizer停止加载
+                
+                # 处理不同类型的消息
+                if isinstance(message, str):
+                    # 正常的消息字符串
+                    loading_window.add_log(message)
+                elif isinstance(progress, str):
+                    # 有时候Transformers库会将进度条字符串作为第一个参数传递
+                    loading_window.add_log(progress)
+                
+                # 如果有数值进度，更新进度条
+                if isinstance(progress, (int, float)) and 0 <= progress <= 1:
+                    loading_window.update_progress(progress)
+                
+                # 返回取消状态
+                return loading_window.cancelled
+            
+            # 创建TitanSummarizer实例并加载模型
+            self.summarizer = None  # 重置之前的实例
+            
+            # 如果用户取消了，提前结束
+            if loading_window.cancelled:
+                loading_window.add_log("加载过程被取消", "warning")
+                sys.stdout = original_stdout
+                return
+                
+            # 创建实例并加载模型
+            try:
+                loading_window.add_log("开始创建模型实例...", "info")
+                self.summarizer = TitanSummarizer(model_size, device, progress_callback)
+                
+                # 模型加载完成后的处理
+                if not loading_window.cancelled and self.summarizer is not None and hasattr(self.summarizer, 'model') and self.summarizer.model is not None:
+                    loading_window.add_log("模型加载完成!", "success")
+                    loading_window.update_progress(1.0)
+                    
+                    # 更新UI按钮状态
+                    self.root.after(0, lambda: self.update_button_states(True))
+                    
+                    # 延迟关闭窗口，让用户有时间看到最终状态
+                    time.sleep(1)
+                    
+                    # 如果没有取消，自动关闭窗口
+                    if not loading_window.cancelled:
+                        loading_window.close()
+                elif loading_window.cancelled:
+                    loading_window.add_log("模型加载被用户取消", "warning")
+            except KeyboardInterrupt:
+                loading_window.add_log("模型加载被中断", "warning")
+                loading_window.cancelled = True
+            except Exception as e:
+                loading_window.add_log(f"模型加载过程中发生错误: {str(e)}", "error")
+                loading_window.cancelled = True
+                
+        except Exception as e:
+            # 恢复原始标准输出
+            sys.stdout = original_stdout
+            
+            error_message = f"模型加载失败: {str(e)}"
+            print(error_message)  # 输出到控制台
+            
+            if loading_window and not loading_window.cancelled:
+                try:
+                    loading_window.add_log(error_message, "error")
+                    loading_window.add_log(traceback.format_exc(), "error")
+                    # 延迟关闭窗口，让用户有时间看到错误信息
+                    time.sleep(3)
+                    loading_window.close()
+                except Exception as ui_error:
+                    print(f"显示错误信息失败: {ui_error}")
+        finally:
+            # 恢复原始标准输出
+            sys.stdout = original_stdout
+        
+    def update_ui_after_model_loaded(self):
+        """模型加载后更新UI"""
+        try:
+            # 启用相关按钮
+            self.update_button_states(True)
+            
+            # 更新状态
+            self.update_status("模型加载完成")
+        except Exception as e:
+            logger.error(f"更新UI失败: {str(e)}")
+
     def select_novel(self):
         """选择小说文件"""
         file_path = filedialog.askopenfilename(

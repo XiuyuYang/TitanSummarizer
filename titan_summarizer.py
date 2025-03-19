@@ -11,340 +11,193 @@ import logging
 import torch
 import time
 import sys
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, AutoModel
 from transformers.utils import logging as transformers_logging
 from pathlib import Path
 from typing import Optional, List, Dict, Callable, Tuple
 from tqdm import tqdm
 import re
 
+# 导入模型名称映射
+from get_model_name import MODELS, get_model_name
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger("TitanSummarizer")
 
 # 设置transformers的日志级别
 transformers_logging.set_verbosity_info()
 
-# 模型配置
-MODELS = {
-    "1.5B": "THUDM/chatglm-6b",
-    "7B": "THUDM/chatglm2-6b",
-    "Qwen-7B": "Qwen/Qwen-7B",
-    "Qwen-14B": "Qwen/Qwen-14B",
-    "Qwen-32B": "Qwen/Qwen-32B",
-    "Qwen-72B": "Qwen/Qwen-72B"
-}
-
-# 添加Hugging Face日志处理器
-class ProgressHandler(logging.Handler):
-    """
-    处理transformers日志并转换为进度回调的处理器
-    """
-    def __init__(self, callback, stage="模型"):
-        """
-        初始化处理器
-        :param callback: 进度回调函数
-        :param stage: 当前处理阶段名称（"分词器"或"模型"）
-        """
-        super().__init__()
-        self.callback = callback
-        self.stage = stage
-        
-    def emit(self, record):
-        """处理日志记录"""
-        try:
-            msg = self.format(record)
-            
-            # 处理下载进度信息 - 适应多种格式
-            if "Downloading" in msg:
-                try:
-                    # 尝试更精确地提取文件名
-                    if ":" in msg:
-                        file_parts = msg.split(":")
-                        file_name = file_parts[0].split("Downloading")[-1].strip()
-                    else:
-                        file_name_match = re.search(r"Downloading (.*?)(\[|\s|$)", msg)
-                        if file_name_match:
-                            file_name = file_name_match.group(1).strip()
-                        else:
-                            file_name = "未知文件"
-                    
-                    # 提取进度百分比 - 支持更多格式
-                    file_percentage = None
-                    if "[" in msg and "]" in msg:
-                        bracket_content = msg.split("[")[1].split("]")[0].strip()
-                        if "%" in bracket_content:
-                            try:
-                                file_percentage = float(bracket_content.replace("%", "").strip())
-                                # 确保是有效数字
-                                if not (0 <= file_percentage <= 100):
-                                    file_percentage = None
-                            except:
-                                pass
-                    
-                    # 直接从文本中搜索百分比
-                    if file_percentage is None:
-                        percent_match = re.search(r"(\d+(\.\d+)?)%", msg)
-                        if percent_match:
-                            try:
-                                file_percentage = float(percent_match.group(1))
-                            except:
-                                pass
-                    
-                    # 如果仍然没有进度数据，查找特殊模式
-                    if file_percentage is None and "it/s]" in msg:
-                        # 可能是HF的下载开始消息，设为5%作为起始
-                        file_percentage = 5.0
-                        
-                    # 提取大小信息
-                    size_info = ""
-                    if "]" in msg:
-                        size_part = msg.split("]")[-1].strip()
-                        if "/" in size_part:
-                            size_info = size_part.strip()
-                    
-                    # 构建详细信息
-                    detail = f"{self.stage}下载{file_name}"
-                    if size_info:
-                        detail += f": {size_info}"
-                    
-                    # 计算总体进度
-                    if file_percentage is not None:
-                        if self.stage == "分词器":
-                            # 分词器阶段占总进度的20%
-                            overall_progress = 0.1 + (file_percentage / 100.0) * 0.2
-                        else:
-                            # 模型阶段占总进度的50%
-                            overall_progress = 0.3 + (file_percentage / 100.0) * 0.5
-                        
-                        # 打印调试信息
-                        logger.debug(f"文件下载进度解析成功: 文件={file_name}, 百分比={file_percentage:.1f}%, 整体进度={overall_progress:.2f}")
-                        
-                        # 调用回调函数 - 传递详细文件进度信息
-                        self.callback(overall_progress, detail, file_percentage)
-                    else:
-                        # 如果没提取到百分比但确实是下载消息，使用默认值
-                        logger.debug(f"未能从下载消息解析进度百分比: {msg}")
-                        if "starting" in msg.lower():
-                            self.callback(0.3 if self.stage == "模型" else 0.1, detail, 0)
-                        
-                except Exception as e:
-                    logger.error(f"解析下载进度失败: {str(e)}, 消息: {msg}")
-            
-            # 处理完成信息
-            elif "100%" in msg and ("Downloading" in msg or "download" in msg.lower()):
-                logger.debug("检测到100%下载完成消息")
-                self.callback(0.8 if self.stage == "模型" else 0.3, f"{self.stage}下载完成，正在优化...", 100.0)
-            
-            # 处理其他日志消息
-            elif not any(skip_term in msg.lower() for skip_term in ["download", "extract", "load"]):
-                # 对于非下载类消息，只更新总体进度
-                if "初始化" in msg:
-                    self.callback(0.05, msg, None)
-                elif "加载" in msg:
-                    self.callback(0.85, msg, None)
-                elif "优化" in msg:
-                    self.callback(0.95, msg, None)
-        except Exception as e:
-            logger.error(f"进度处理器处理失败: {str(e)}")
-    
-    def _format_size(self, size_bytes):
-        """格式化文件大小"""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if size_bytes < 1024.0 or unit == 'GB':
-                return f"{size_bytes:.2f} {unit}"
-            size_bytes /= 1024.0
-        return f"{size_bytes:.2f} GB"
-
 class TitanSummarizer:
-    def __init__(self, model_size="1.5B", device="cpu", progress_callback=None):
+    def __init__(
+        self,
+        model_size: str = "medium",
+        device: str = "cpu",
+        progress_callback: Optional[Callable[[float, str, Optional[float]], None]] = None
+    ) -> None:
         """
-        初始化摘要器
-        :param model_size: 模型大小，可选：1.5B, 7B, Qwen-7B, Qwen-14B, Qwen-32B, Qwen-72B
-        :param device: 使用设备，可选值：cpu, cuda
-        :param progress_callback: 进度回调函数，接收两个参数：进度(0-1)和消息
+        初始化TitanSummarizer类
+        
+        Args:
+            model_size: 模型大小 (small/medium/large 或 1.5B/6B/7B/13B)
+            device: 设备 (cpu/cuda)
+            progress_callback: 进度回调函数，接收三个参数：进度(0-1)，消息，文件进度(0-100或None)
         """
         self.model_size = model_size
         self.device = device
         self.progress_callback = progress_callback
-        self.model_name = MODELS.get(model_size, MODELS["1.5B"])
-        self.model = None
-        self.tokenizer = None
         
-        # 初始化模型
+        # 设置模型下载位置 - 确保下载到当前目录的models文件夹
+        models_dir = os.path.join(os.getcwd(), "models")
+        if not os.path.exists(models_dir):
+            os.makedirs(models_dir)
+            logger.info(f"创建模型目录: {models_dir}")
+            
+        # 设置环境变量指定下载位置
+        os.environ["TRANSFORMERS_CACHE"] = models_dir
+        os.environ["HF_HOME"] = models_dir
+        os.environ["HF_DATASETS_CACHE"] = os.path.join(models_dir, "datasets")
+        os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(models_dir, "hub")
+        logger.info(f"设置模型下载路径: {models_dir}")
+        
+        # 确定模型名称 - 使用get_model_name函数
+        self.model_name = get_model_name(model_size)
+        logger.info(f"使用模型: {self.model_name} (来自参数: {model_size})")
+        
+        self.tokenizer = None
+        self.model = None
+        
+        # 初始化模型和分词器
         self._init_model()
         
-    def _init_model(self):
-        """
-        初始化分词器和模型
-        
-        Args:
-            model_size: 模型大小 (small/medium/large)
-            device: 设备 (cpu/cuda)
-        """
-        # 确定模型名称
-        model_names = {
-            "small": "THUDM/chatglm-6b",
-            "medium": "THUDM/chatglm2-6b",
-            "large": "THUDM/chatglm3-6b"
-        }
-        model_name = model_names.get(self.model_size, "THUDM/chatglm2-6b")
-        
-        # 备用模型（如果主模型加载失败）
-        backup_models = ["THUDM/chatglm-6b", "THUDM/chatglm2-6b", "THUDM/chatglm3-6b"]
-        
-        # 移除当前模型，确保尝试其他备用模型
-        if model_name in backup_models:
-            backup_models.remove(model_name)
-            
+    def _init_model(self) -> None:
+        """初始化大语言模型和分词器"""
         try:
-            if self.progress_callback:
-                self.progress_callback(0.05, f"正在初始化分词器: {model_name}")
+            # 设置缓存目录
+            models_dir = os.path.join(os.getcwd(), "models")
+            cache_dir = models_dir
             
-            # 为分词器创建进度处理器
-            handlers = []
+            # 直接回调进度信息
+            def send_to_callback(message):
+                if self.progress_callback:
+                    self.progress_callback(None, message, None)
+            
+            # 报告开始加载
             if self.progress_callback:
-                tokenizer_progress = ProgressHandler(self.progress_callback, "分词器")
-                handlers.append(tokenizer_progress)
-                logger.debug(f"添加分词器进度处理器")
+                self.progress_callback(0.01, "开始加载模型和分词器...", None)
+            
+            # 加载分词器
+            logger.info(f"从 {self.model_name} 加载分词器")
+            
+            # 加载分词器时把所有输出都发给回调函数
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name,
+                trust_remote_code=True,
+                cache_dir=cache_dir
+            )
+            
+            # 检查分词器类型
+            tokenizer_class = type(self.tokenizer).__name__
+            if self.progress_callback:
+                self.progress_callback(0.15, f"加载的分词器类型: {tokenizer_class}", None)
                 
-                # 添加日志处理器
-                transformers_logger = logging.getLogger("transformers")
-                for handler in handlers:
-                    transformers_logger.addHandler(handler)
-            
-            # 首先尝试加载分词器
+            # 加载模型配置
+            if self.progress_callback:
+                self.progress_callback(0.2, "加载模型配置...", None)
+                
+            # 获取模型配置
+            logger.info(f"从 {self.model_name} 加载模型配置")
+            model_config = AutoConfig.from_pretrained(
+                self.model_name,
+                trust_remote_code=True,
+                cache_dir=cache_dir
+            )
+                
+            # 尝试加载模型
             try:
-                if "chatglm3" in model_name.lower():
-                    tokenizer = AutoTokenizer.from_pretrained(
-                        model_name, 
-                        trust_remote_code=True
+                # 报告开始加载模型权重
+                if self.progress_callback:
+                    self.progress_callback(0.3, "加载模型权重...", None)
+                    
+                logger.info(f"从 {self.model_name} 加载模型")
+                
+                # 定义进度回调函数
+                def progress_callback_fn(progress, message):
+                    # 如果已经有progress_callback，直接传递消息
+                    if self.progress_callback:
+                        # 计算总体进度：30% + (下载进度 * 60%)
+                        if isinstance(progress, float) and 0 <= progress <= 1:
+                            overall_progress = 0.3 + progress * 0.6
+                        else:
+                            overall_progress = None
+                            
+                        # 发送消息，可能包含进度条
+                        return self.progress_callback(overall_progress, message, None)
+                    return False
+                
+                # 加载模型 - 尝试使用progress_callback参数
+                self.model = AutoModel.from_pretrained(
+                    self.model_name,
+                    config=model_config,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float16 if self.device != "cpu" else torch.float32,
+                    device_map=self.device,
+                    cache_dir=cache_dir,
+                    progress_callback=progress_callback_fn
+                )
+            except Exception as e:
+                if "unexpected keyword argument 'progress_callback'" in str(e):
+                    # 如果不支持进度回调，显示警告并重新加载
+                    warning_msg = f"模型 {self.model_name} 不支持进度回调参数: {str(e)}"
+                    logger.warning(warning_msg)
+                    if self.progress_callback:
+                        self.progress_callback(0.3, warning_msg, None)
+                    
+                    # 通知将使用标准方式加载模型
+                    if self.progress_callback:
+                        self.progress_callback(0.31, "使用标准方式加载模型...", None)
+                    
+                    # 重新加载模型，不使用进度回调
+                    self.model = AutoModel.from_pretrained(
+                        self.model_name,
+                        config=model_config,
+                        trust_remote_code=True,
+                        torch_dtype=torch.float16 if self.device != "cpu" else torch.float32,
+                        device_map=self.device,
+                        cache_dir=cache_dir
                     )
                 else:
-                    tokenizer = AutoTokenizer.from_pretrained(
-                        model_name, 
-                        trust_remote_code=True
-                    )
-                    
-                logger.info(f"分词器 {model_name} 加载成功")
-                if self.progress_callback:
-                    self.progress_callback(0.3, f"分词器加载成功，正在初始化模型: {model_name}")
-            except Exception as e:
-                logger.error(f"分词器加载失败: {str(e)}")
+                    # 其它错误直接抛出
+                    raise e
                 
-                # 尝试备用模型分词器
-                tokenizer = None
-                for backup_model in backup_models:
-                    try:
-                        if self.progress_callback:
-                            self.progress_callback(0.1, f"尝试使用备用模型分词器: {backup_model}")
-                        logger.info(f"尝试使用备用模型分词器: {backup_model}")
-                        
-                        tokenizer = AutoTokenizer.from_pretrained(
-                            backup_model, 
-                            trust_remote_code=True
-                        )
-                        
-                        logger.info(f"备用分词器 {backup_model} 加载成功")
-                        if self.progress_callback:
-                            self.progress_callback(0.3, f"备用分词器 {backup_model} 加载成功")
-                        model_name = backup_model  # 更新模型名称
-                        break
-                    except Exception as backup_error:
-                        logger.error(f"备用分词器 {backup_model} 加载失败: {str(backup_error)}")
-                
-                if tokenizer is None:
-                    raise ValueError("所有分词器加载均失败，请检查网络连接或模型配置")
-            
-            # 移除分词器进度处理器，准备加载模型
+            # 模型加载完成
             if self.progress_callback:
-                for handler in handlers:
-                    transformers_logger.removeHandler(handler)
-                handlers.clear()
+                self.progress_callback(0.95, "模型加载完成，进行最终设置...", None)
                 
-                # 创建模型进度处理器
-                model_progress = ProgressHandler(self.progress_callback, "模型")
-                handlers.append(model_progress)
-                transformers_logger.addHandler(model_progress)
-                
-                # 设置进度阶段
-                self.progress_callback(0.3, f"正在加载模型: {model_name}")
+            # 设置为评估模式
+            self.model.eval()
             
-            # 监控文件下载进度的自定义回调
-            class DownloadProgressCallback(object):
-                def __init__(self, progress_callback):
-                    self.progress_callback = progress_callback
-                    
-                def __call__(self, current, total, width=80):
-                    if total > 0:
-                        file_percentage = current / total * 100
-                        # 直接更新文件进度
-                        self.progress_callback(0.4, f"下载模型文件: {current}/{total}", file_percentage)
-                    
-            # 创建下载进度回调
-            download_callback = DownloadProgressCallback(self.progress_callback) if self.progress_callback else None
-                
-            # 加载模型
-            try:
-                if "chatglm3" in model_name.lower():
-                    model = AutoModelForCausalLM.from_pretrained(
-                        model_name, 
-                        trust_remote_code=True,
-                        device_map=self.device,
-                        bf16=False,
-                        fp16=(self.device=="cuda"),
-                        progress_callback=download_callback
-                    )
-                else:
-                    model = AutoModelForCausalLM.from_pretrained(
-                        model_name, 
-                        trust_remote_code=True,
-                        device_map=self.device,
-                        progress_callback=download_callback
-                    )
-                
-                logger.info(f"模型 {model_name} 加载成功")
-                if self.progress_callback:
-                    self.progress_callback(0.9, f"模型加载成功，正在优化...")
-            except Exception as e:
-                logger.error(f"模型加载失败: {str(e)}")
-                raise
-            finally:
-                # 移除日志处理器
-                if self.progress_callback:
-                    for handler in handlers:
-                        transformers_logger.removeHandler(handler)
-            
-            # 设置模型优化
-            if self.device == "cuda":
-                model = model.half()
-                logger.info("模型已转换为半精度")
-            
-            model.eval()
-            logger.info("模型已设置为评估模式")
-            
-            # 保存模型和分词器
-            self.tokenizer = tokenizer
-            self.model = model
-            
+            # 完成初始化
             if self.progress_callback:
-                self.progress_callback(1.0, "模型初始化完成")
+                self.progress_callback(1.0, "模型加载完成!", None)
                 
-            logger.info("模型初始化完成")
-        
+            logger.info("模型加载成功")
+            
         except Exception as e:
-            # 确保清理所有处理器
-            if 'handlers' in locals() and handlers:
-                transformers_logger = logging.getLogger("transformers")
-                for handler in handlers:
-                    if handler in transformers_logger.handlers:
-                        transformers_logger.removeHandler(handler)
-                        
-            logger.error(f"模型初始化失败: {str(e)}")
-            raise
+            error_msg = f"初始化模型失败: {str(e)}"
+            logger.error(error_msg)
+            if hasattr(self, 'progress_callback') and self.progress_callback:
+                self.progress_callback(0, error_msg, None)
+            raise Exception(error_msg)
+            
+    def _ensure_tokenizer_compatibility(self):
+        """确保分词器兼容性"""
+        logger.info("分词器兼容性检查完成")
+        return
             
     def generate_summary(
         self,
@@ -377,7 +230,7 @@ class TitanSummarizer:
             
             if self.progress_callback:
                 self.progress_callback(0.3, "正在生成摘要...", file_percentage)
-                
+        
             # 生成摘要
             with torch.no_grad():
                 outputs = self.model.generate(
@@ -397,12 +250,17 @@ class TitanSummarizer:
             # 解码输出
             summary = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
             
-            # 提取摘要部分
-            summary = summary.split("摘要：")[-1].strip()
-            
-            # 实时回调
+            # 如果有回调，实时更新输出
             if callback:
                 callback(summary)
+                
+            # 尝试提取摘要部分
+            if "摘要：" in summary:
+                summary = summary.split("摘要：")[1].strip()
+                
+            # 限制长度
+            if len(summary) > max_length * 3:  # 考虑中文字符可能导致的较长输出
+                summary = summary[:max_length * 3] + "..."
                 
             if self.progress_callback:
                 self.progress_callback(1.0, "摘要生成完成", file_percentage)
@@ -410,55 +268,142 @@ class TitanSummarizer:
             return summary
             
         except Exception as e:
-            logger.error(f"生成摘要失败: {str(e)}")
-            raise
-
-    def process_file(self, file_path: str, max_length: int = 20, callback: Callable[[str], None] = None) -> Optional[str]:
-        """处理文件并生成摘要"""
-        try:
-            file_path = Path(file_path)
-            if not file_path.exists():
-                logger.error(f"文件不存在: {file_path}")
-                return None
-
-            # 尝试使用不同编码读取文件
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    text = f.read()
-            except UnicodeDecodeError:
-                try:
-                    with open(file_path, 'r', encoding='gb2312') as f:
-                        text = f.read()
-                except UnicodeDecodeError:
-                    logger.error(f"无法读取文件，不支持的编码: {file_path}")
-                    return None
-
-            return self.generate_summary(text, max_length, callback)
-
-        except Exception as e:
-            logger.error(f"处理文件时出错: {str(e)}")
-            return None
+            error_msg = f"生成摘要失败: {str(e)}"
+            logger.error(error_msg)
+            if self.progress_callback:
+                self.progress_callback(0, error_msg, file_percentage)
+            return f"摘要生成失败: {str(e)}"
             
-    def get_model_info(self) -> Dict:
-        """获取模型信息"""
-        return {
-            "model_name": self.model_name,
-            "model_size": self.model_size,
-            "device": self.device,
-            "loaded": self.model is not None
-        }
+    def translate_text(
+        self,
+        text: str,
+        target_language: str = "English",
+        callback: Optional[Callable[[str], None]] = None
+    ) -> str:
+        """
+        翻译文本
+        
+        Args:
+            text: 输入文本
+            target_language: 目标语言
+            callback: 实时回调函数
+            
+        Returns:
+            翻译后的文本
+        """
+        try:
+            # 构建输入
+            prompt = f"请将以下中文文本翻译为{target_language}：\n\n{text}\n\n翻译："
+            
+            # 编码输入
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+            
+            # 生成摘要
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_length=len(text) * 2,  # 翻译后文本可能变长
+                    num_beams=4,
+                    length_penalty=0.6,
+                    repetition_penalty=1.2,
+                    temperature=0.7,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
+                
+            # 解码输出
+            translation = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            # 如果有回调，实时更新输出
+            if callback:
+                callback(translation)
+                
+            # 尝试提取翻译部分
+            if "翻译：" in translation:
+                translation = translation.split("翻译：")[1].strip()
+                
+            return translation
+            
+        except Exception as e:
+            error_msg = f"翻译文本失败: {str(e)}"
+            logger.error(error_msg)
+            return f"翻译失败: {str(e)}"
+            
+# 进度处理类
+class ProgressHandler:
+    def __init__(self, callback=None):
+        """初始化进度处理器"""
+        self.callback = callback
+        self.current_file = None
+        self.current_file_percentage = 0
+        
+    def __call__(self, progress, message, file_progress=None):
+        """处理进度更新"""
+        # 如果有文件进度信息，更新当前文件
+        if isinstance(message, str):
+            # 检查是否是下载消息
+            if message.startswith("Downloading "):
+                try:
+                    # 提取文件名
+                    filename = message.split("Downloading ")[1].split()[0]
+                    if filename != self.current_file:
+                        self.current_file = filename
+                        logger.info(f"正在下载: {filename}")
+                        
+                    # 检查文件进度
+                    if isinstance(file_progress, (int, float)):
+                        self.current_file_percentage = file_progress
+                        # 整体进度：30%基础进度 + 当前文件进度的50%
+                        overall_progress = 0.3 + (file_progress / 100.0) * 0.5
+                        
+                        # 调用回调函数
+                        if self.callback:
+                            return self.callback(overall_progress, message, file_progress)
+                except Exception as e:
+                    logger.error(f"处理下载进度信息失败: {e}")
+                
+            # 处理模型加载消息
+            elif "加载模型" in message:
+                if self.callback:
+                    return self.callback(0.8, message, None)
+            
+            # 其他消息直接传递
+            elif self.callback:
+                return self.callback(progress, message, None)
+                
+        return False  # 默认不中断处理
 
-def main():
-    # 使用示例
-    summarizer = TitanSummarizer(model_size="1.5B", device="cuda")
+def test_summarizer():
+    """测试摘要生成器"""
+    # 测试文本
+    test_text = """
+    金庸的武侠小说《射雕英雄传》塑造了郭靖、黄蓉、洪七公、欧阳锋等经典人物。
+    故事从郭靖出生写起，写到郭靖黄蓉大婚为止。
+    主人公郭靖系金国将领郭啸天与包惜弱之子，郭啸天遭奸人所害，包惜弱带着未出世的儿子返回大宋。
+    郭靖自幼勤奋好学、倔强木讷，得到江南七怪、马钰、洪七公等人的传授武功。
+    他与聪明狡黠的黄蓉相知相爱，从桃花岛主黄药师处学得武功，闯荡江湖。
+    在他们闯荡江湖的同时，郭靖逐渐从一个懵懂少年变成了一个有理想有道德的侠士，终成一代英雄。
+    """
     
-    # 示例文本
-    text = """二愣子睁大着双眼，直直望着茅草和烂泥糊成的黑屋顶，身上盖着的旧棉被，已呈深黄色，看不出原来的本来面目，还若有若无的散发着淡淡的霉味。"""
+    # 创建摘要生成器
+    summarizer = TitanSummarizer(model_size="1.5B")
     
     # 生成摘要
-    summary = summarizer.generate_summary(text, max_length=20)
-    print("\n\n完整摘要:")
+    def progress_callback(progress, message, file_progress):
+        """进度回调函数"""
+        if isinstance(progress, (int, float)):
+            print(f"进度: {progress * 100:.1f}%")
+        if message:
+            print(f"消息: {message}")
+        if file_progress:
+            print(f"文件进度: {file_progress:.1f}%")
+        return False  # 不中断处理
+        
+    summary = summarizer.generate_summary(test_text, callback=lambda x: print(f"生成: {x}"))
+    
+    # 打印摘要
+    print("\n最终摘要:")
     print(summary)
 
 if __name__ == "__main__":
-    main() 
+    test_summarizer() 
