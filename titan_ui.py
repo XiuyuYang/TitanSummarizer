@@ -1,804 +1,144 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-TitanSummarizer - 用户界面
-支持中文小说等长文本的摘要生成
+TitanSummarizer - 大文本摘要系统UI
+简化版UI，专注于中文小说摘要生成
+使用DeepSeek API进行云端摘要
 """
 
 import os
-import sys
-import tkinter as tk
-from tkinter import ttk, filedialog, scrolledtext, messagebox
-import threading
-import time
-import logging
-import torch
-from pathlib import Path
-import datetime
 import re
 import json
-import traceback
+import time
+import queue
+import logging
+import threading
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, scrolledtext
+import sys
+import io
 
-# 导入辅助函数模块
-from get_model_name import get_model_name, get_model_display_name, get_folder_size, get_readable_size
+# 导入自定义模块
+from titan_summarizer import TitanSummarizer
+from get_model_name import get_model_display_name, get_model_name
 
-# 导入摘要生成器
-try:
-    from titan_summarizer import TitanSummarizer
-except ImportError:
-    print("警告: 找不到titan_summarizer模块，模型加载功能可能不可用")
-
-# 配置日志
+# 设置日志记录
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("titan_ui.log", encoding="utf-8", mode="w"),
+        logging.StreamHandler()
+    ]
 )
-logger = logging.getLogger("TitanUI")
+logger = logging.getLogger("titan_ui")
 
-# 创建进度专用日志器
-progress_logger = logging.getLogger("progress")
-progress_logger.setLevel(logging.INFO)
-
-# 全局变量，用于保存加载窗口的引用
-loading_window = None
-
-# 创建专门的进度条日志记录器
-progress_logger = logging.getLogger("progress_logger")
-progress_logger.setLevel(logging.DEBUG)
-
-# 确保logs目录存在
-if not os.path.exists("logs"):
-    os.makedirs("logs")
-
-# 创建带时间戳的日志文件名
-timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-progress_log_file = f"logs/progress_{timestamp}.log"
-
-# 添加文件处理器
-progress_file_handler = logging.FileHandler(progress_log_file, encoding="utf-8")
-progress_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-progress_logger.addHandler(progress_file_handler)
-
-# 确保不会传递到父级logger
-progress_logger.propagate = False
-
-# 记录初始日志
-progress_logger.info(f"===== 进度条日志开始记录 =====")
-progress_logger.info(f"日志文件: {progress_log_file}")
-
-# 使用从get_model_name模块导入的函数
-
-class SettingsWindow:
-    def __init__(self, parent, settings):
-        self.window = tk.Toplevel(parent)
-        self.window.title("设置")
-        self.window.geometry("500x500")
-        self.window.resizable(False, False)
-        self.window.transient(parent)
-        self.window.grab_set()
-        
-        # 保存设置引用
-        self.settings = settings
-        
-        # 创建主框架
-        main_frame = ttk.Frame(self.window, padding="20")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 创建设置选项
-        self.create_settings(main_frame)
-        
-        # 创建按钮
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(20, 0))
-        
-        ttk.Button(
-            button_frame,
-            text="保存",
-            command=self.save_settings
-        ).pack(side=tk.RIGHT, padx=5)
-        
-        ttk.Button(
-            button_frame,
-            text="取消",
-            command=self.window.destroy
-        ).pack(side=tk.RIGHT, padx=5)
-        
-    def create_settings(self, parent):
-        # 模型设置
-        model_frame = ttk.LabelFrame(parent, text="模型设置", padding="10")
-        model_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Label(model_frame, text="默认模型:").grid(row=0, column=0, sticky=tk.W)
-        self.model_var = tk.StringVar(value=self.settings.get("default_model", "1.5B"))
-        model_options = ["small", "medium", "large", "1.5B", "6B", "7B", "13B"]  # 使用固定的选项列表
-        model_combo = ttk.Combobox(
-            model_frame,
-            textvariable=self.model_var,
-            values=model_options,
-            state="readonly",
-            width=30
-        )
-        model_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
-        
-        # 设备设置
-        ttk.Label(model_frame, text="默认设备:").grid(row=1, column=0, sticky=tk.W)
-        self.device_var = tk.StringVar(value=self.settings.get("default_device", "GPU"))
-        device_combo = ttk.Combobox(
-            model_frame,
-            textvariable=self.device_var,
-            values=["GPU", "CPU"],
-            state="readonly",
-            width=30
-        )
-        device_combo.grid(row=1, column=1, sticky=tk.W, padx=5)
-        
-        # 摘要设置
-        summary_frame = ttk.LabelFrame(parent, text="摘要设置", padding="10")
-        summary_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Label(summary_frame, text="默认摘要长度:").grid(row=0, column=0, sticky=tk.W)
-        self.length_var = tk.StringVar(value=str(self.settings.get("default_length", 20)))
-        ttk.Entry(summary_frame, textvariable=self.length_var, width=10).grid(row=0, column=1, sticky=tk.W, padx=5)
-        
-        # 章节设置
-        chapter_frame = ttk.LabelFrame(parent, text="章节设置", padding="10")
-        chapter_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Label(chapter_frame, text="章节标题模式:").grid(row=0, column=0, sticky=tk.W)
-        self.chapter_pattern_var = tk.StringVar(value=self.settings.get("chapter_pattern", r"第[零一二三四五六七八九十百千万]+章"))
-        ttk.Entry(chapter_frame, textvariable=self.chapter_pattern_var, width=30).grid(row=0, column=1, sticky=tk.W, padx=5)
-        
-        # 翻译设置
-        translate_frame = ttk.LabelFrame(parent, text="翻译设置", padding="10")
-        translate_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Label(translate_frame, text="目标语言:").grid(row=0, column=0, sticky=tk.W)
-        self.target_lang_var = tk.StringVar(value=self.settings.get("target_language", "English"))
-        lang_combo = ttk.Combobox(
-            translate_frame,
-            textvariable=self.target_lang_var,
-            values=["English", "Japanese", "Korean", "French", "German"],
-            state="readonly",
-            width=30
-        )
-        lang_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
-        
-        # 界面设置
-        ui_frame = ttk.LabelFrame(parent, text="界面设置", padding="10")
-        ui_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        self.theme_var = tk.StringVar(value=self.settings.get("theme", "clam"))
-        ttk.Label(ui_frame, text="主题:").grid(row=0, column=0, sticky=tk.W)
-        theme_combo = ttk.Combobox(
-            ui_frame,
-            textvariable=self.theme_var,
-            values=["clam", "alt", "default", "classic"],
-            state="readonly",
-            width=30
-        )
-        theme_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
-        
-    def save_settings(self):
-        """保存设置"""
-        try:
-            self.settings.update({
-                "default_model": self.model_var.get(),
-                "default_device": self.device_var.get(),
-                "default_length": int(self.length_var.get()),
-                "chapter_pattern": self.chapter_pattern_var.get(),
-                "target_language": self.target_lang_var.get(),
-                "theme": self.theme_var.get()
-            })
-            
-            # 保存到文件
-            with open("settings.json", "w", encoding="utf-8") as f:
-                json.dump(self.settings, f, ensure_ascii=False, indent=2)
-                
-            self.window.destroy()
-            messagebox.showinfo("成功", "设置已保存")
-            
-        except Exception as e:
-            messagebox.showerror("错误", f"保存设置失败: {str(e)}")
-
-class AboutWindow:
-    def __init__(self, parent):
-        self.window = tk.Toplevel(parent)
-        self.window.title("关于")
-        self.window.geometry("400x300")
-        self.window.resizable(False, False)
-        self.window.transient(parent)
-        self.window.grab_set()
-        
-        # 创建主框架
-        main_frame = ttk.Frame(self.window, padding="20")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 标题
-        title_label = ttk.Label(
-            main_frame,
-            text="TitanSummarizer",
-            font=('Microsoft YaHei UI', 16, 'bold')
-        )
-        title_label.pack(pady=(0, 10))
-        
-        # 版本
-        version_label = ttk.Label(
-            main_frame,
-            text="版本 1.0.0",
-            font=('Microsoft YaHei UI', 10)
-        )
-        version_label.pack(pady=(0, 20))
-        
-        # 描述
-        desc_text = """
-TitanSummarizer 是一个强大的文本摘要系统，
-专门用于处理中文小说等长文本的摘要生成。
-
-主要特点：
-• 支持多种预训练模型
-• 智能章节划分
-• 实时生成摘要
-• 多语言翻译
-• 专业级用户界面
-• 丰富的自定义选项
-
-作者：Your Name
-        """
-        
-        desc_label = ttk.Label(
-            main_frame,
-            text=desc_text,
-            font=('Microsoft YaHei UI', 10),
-            justify=tk.LEFT
-        )
-        desc_label.pack(pady=(0, 20))
-        
-        # 关闭按钮
-        ttk.Button(
-            main_frame,
-            text="关闭",
-            command=self.window.destroy
-        ).pack()
-
-class ChapterListWindow:
-    def __init__(self, parent, chapters, callback):
-        self.window = tk.Toplevel(parent)
-        self.window.title("章节列表")
-        self.window.geometry("800x600")
-        self.window.transient(parent)
-        self.window.grab_set()
-        
-        # 创建主框架
-        main_frame = ttk.Frame(self.window, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 创建工具栏
-        toolbar = ttk.Frame(main_frame)
-        toolbar.pack(fill=tk.X, pady=(0, 10))
-        
-        # 搜索框
-        search_frame = ttk.Frame(toolbar)
-        search_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Label(search_frame, text="搜索:").pack(side=tk.LEFT, padx=5)
-        self.search_var = tk.StringVar()
-        self.search_var.trace('w', self.filter_chapters)
-        search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=30)
-        search_entry.pack(side=tk.LEFT, padx=5)
-        
-        # 按钮
-        button_frame = ttk.Frame(toolbar)
-        button_frame.pack(side=tk.RIGHT)
-        
-        ttk.Button(
-            button_frame,
-            text="全选",
-            command=lambda: self.select_all(True)
-        ).pack(side=tk.LEFT, padx=5)
-        
-        ttk.Button(
-            button_frame,
-            text="取消全选",
-            command=lambda: self.select_all(False)
-        ).pack(side=tk.LEFT, padx=5)
-        
-        ttk.Button(
-            button_frame,
-            text="生成选中章节摘要",
-            command=lambda: self.generate_selected(callback)
-        ).pack(side=tk.LEFT, padx=5)
-        
-        # 创建章节列表
-        self.chapter_vars = {}
-        self.chapters = chapters
-        self.chapter_list = ttk.Treeview(
-            main_frame,
-            columns=("title", "length", "status"),
-            show="headings"
-        )
-        self.chapter_list.heading("title", text="章节标题")
-        self.chapter_list.heading("length", text="长度")
-        self.chapter_list.heading("status", text="状态")
-        self.chapter_list.column("title", width=500)
-        self.chapter_list.column("length", width=100)
-        self.chapter_list.column("status", width=100)
-        self.chapter_list.pack(fill=tk.BOTH, expand=True)
-        
-        # 添加滚动条
-        scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL, command=self.chapter_list.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.chapter_list.configure(yscrollcommand=scrollbar.set)
-        
-        # 添加章节
-        self.refresh_chapters()
-            
-    def refresh_chapters(self):
-        """刷新章节列表"""
-        # 清空列表
-        for item in self.chapter_list.get_children():
-            self.chapter_list.delete(item)
-            
-        # 添加章节
-        for i, chapter in enumerate(self.chapters):
-            status = "已生成" if chapter.get("summary") else "未生成"
-            self.chapter_list.insert("", tk.END, values=(
-                chapter["title"],
-                f"{len(chapter['content'])}字",
-                status
-            ))
-            self.chapter_vars[i] = tk.BooleanVar(value=True)
-            
-    def filter_chapters(self, *args):
-        """根据搜索文本过滤章节"""
-        search_text = self.search_var.get().lower()
-        
-        # 清空列表
-        for item in self.chapter_list.get_children():
-            self.chapter_list.delete(item)
-            
-        # 添加匹配的章节
-        for i, chapter in enumerate(self.chapters):
-            if search_text in chapter["title"].lower():
-                status = "已生成" if chapter.get("summary") else "未生成"
-                self.chapter_list.insert("", tk.END, values=(
-                    chapter["title"],
-                    f"{len(chapter['content'])}字",
-                    status
-                ))
-                self.chapter_vars[i] = tk.BooleanVar(value=True)
-            
-    def select_all(self, value):
-        """全选/取消全选"""
-        for var in self.chapter_vars.values():
-            var.set(value)
-            
-    def generate_selected(self, callback):
-        """生成选中章节的摘要"""
-        selected = []
-        for i, var in self.chapter_vars.items():
-            if var.get():
-                selected.append(i)
-        if selected:
-            callback(selected)
-            self.refresh_chapters()
-
-class StdoutRedirector:
-    """用于重定向标准输出到Tkinter窗口"""
+class TextRedirector:
+    """将标准输出重定向到文本控件"""
     def __init__(self, text_widget):
         self.text_widget = text_widget
         self.buffer = ""
-        self.line_buffer = []
-        # 保存原始stdout便于调试输出
-        self.original_stdout = sys.stdout
         
     def write(self, string):
-        # 同时输出到原始stdout，便于命令行调试
-        self.original_stdout.write(string)
-        self.original_stdout.flush()
-        
-        # 将输入添加到缓冲区
         self.buffer += string
+        self.text_widget.insert(tk.END, string)
+        self.text_widget.see(tk.END)
+        self.text_widget.update()
         
-        # 处理换行或回车
-        if '\n' in self.buffer or '\r' in self.buffer:
-            # 如果包含回车符，可能是进度条更新
-            if '\r' in self.buffer and '|' in self.buffer and '%' in self.buffer:
-                # 提取最后一个进度条行
-                lines = self.buffer.split('\r')
-                progress_line = lines[-1].strip()
-                
-                if progress_line:
-                    # 过滤掉不完整的行
-                    if self._is_progress_bar(progress_line):
-                        # 发送到UI
-                        self._update_ui_with_progress(progress_line)
-                        
-                # 保留最后一行为缓冲区
-                self.buffer = progress_line if progress_line else ""
-            else:
-                # 正常的换行处理
-                lines = self.buffer.split('\n')
-                # 保留最后一个可能不完整的行
-                self.buffer = lines[-1]
-                
-                # 处理完整的行
-                for line in lines[:-1]:
-                    if line.strip():  # 忽略空行
-                        self._update_ui_with_text(line)
-                        
-    def _update_ui_with_progress(self, progress_line):
-        """更新UI显示进度条"""
-        try:
-            self.text_widget.config(state=tk.NORMAL)
-            
-            # 尝试找到并替换最后一个进度条行
-            found = False
-            progress_line_index = 0
-            
-            # 检查是否有存在的进度条行
-            for i in range(10):
-                tag_name = f"progress_line_{i}"
-                line_ranges = self.text_widget.tag_ranges(tag_name)
-                if line_ranges:
-                    # 替换已有的进度条行
-                    self.text_widget.delete(line_ranges[0], line_ranges[1])
-                    self.text_widget.insert(line_ranges[0], progress_line, (tag_name, "progress"))
-                    found = True
-                    progress_line_index = i
-                    break
-            
-            if not found:
-                # 如果没有找到进度条行，添加新行
-                progress_line_index = 0
-                current_end = self.text_widget.index(tk.END)
-                line_start = f"{float(current_end) - 0.1}"
-                tag_name = f"progress_line_{progress_line_index}"
-                self.text_widget.insert(tk.END, progress_line + "\n", (tag_name, "progress"))
-            
-            # 尝试提取进度百分比
-            self._extract_and_update_progress(progress_line)
-            
-            # 确保进度条行可见
-            self.text_widget.see(tk.END)
-            self.text_widget.config(state=tk.DISABLED)
-            self.text_widget.update_idletasks()
-        except Exception as e:
-            self.original_stdout.write(f"更新进度条失败: {e}\n")
-            
-    def _update_ui_with_text(self, text):
-        """更新UI显示普通文本"""
-        try:
-            # 添加到窗口
-            self.text_widget.config(state=tk.NORMAL)
-            
-            # 确定文本类型
-            tag = "info"
-            if "error" in text.lower() or "失败" in text:
-                tag = "error"
-            elif "warning" in text.lower() or "警告" in text:
-                tag = "warning"
-            elif "success" in text.lower() or "成功" in text:
-                tag = "success"
-            elif self._is_progress_bar(text):
-                tag = "progress"
-                # 尝试提取进度百分比
-                self._extract_and_update_progress(text)
-            
-            # 添加文本
-            self.text_widget.insert(tk.END, text + "\n", tag)
-            
-            # 滚动到底部并更新UI
-            self.text_widget.see(tk.END)
-            self.text_widget.config(state=tk.DISABLED)
-            self.text_widget.update_idletasks()
-        except Exception as e:
-            self.original_stdout.write(f"更新文本失败: {e}\n")
-            
-    def _extract_and_update_progress(self, text):
-        """从进度条文本中提取百分比并更新进度条"""
-        try:
-            # 查找窗口引用
-            window = self.text_widget.master
-            while not isinstance(window, LoadingWindow) and hasattr(window, 'master'):
-                window = window.master
-                
-            if isinstance(window, LoadingWindow):
-                # 尝试提取百分比
-                if '%' in text:
-                    parts = text.split('%', 1)[0].split()
-                    for part in reversed(parts):
-                        try:
-                            # 尝试将部分转换为浮点数
-                            percent = float(part)
-                            if 0 <= percent <= 100:
-                                window.update_progress(percent / 100.0)
-                                break
-                        except ValueError:
-                            continue
-        except Exception as e:
-            self.original_stdout.write(f"提取进度百分比失败: {e}\n")
-                    
     def flush(self):
-        # 刷新原始stdout
-        self.original_stdout.flush()
-        
-        # 处理缓冲区中的剩余内容
-        if self.buffer:
-            if self._is_progress_bar(self.buffer):
-                self._update_ui_with_progress(self.buffer)
-            else:
-                self._update_ui_with_text(self.buffer)
-            self.buffer = ""
-                
-    def _is_progress_bar(self, text):
-        """检查文本是否是进度条"""
-        return "%" in text and ("|" in text or "bar" in text.lower())
-
-class LoadingWindow:
-    def __init__(self, parent):
-        """初始化加载窗口"""
-        self.parent = parent
-        self.window = tk.Toplevel(parent)
-        self.window.title("模型加载中")
-        self.window.geometry("800x600")
-        self.window.resizable(True, True)
-        
-        # 窗口居中
-        self.window.update_idletasks()
-        window_width = self.window.winfo_width()
-        window_height = self.window.winfo_height()
-        screen_width = self.window.winfo_screenwidth()
-        screen_height = self.window.winfo_screenheight()
-        x = (screen_width - window_width) // 2
-        y = (screen_height - window_height) // 2
-        self.window.geometry(f"+{x}+{y}")
-        
-        # 创建主框架
-        main_frame = ttk.Frame(self.window, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 标题
-        title_label = ttk.Label(main_frame, text="正在加载模型", font=("TkDefaultFont", 14, "bold"))
-        title_label.pack(pady=(0, 10))
-        
-        # 状态信息
-        self.status_label = ttk.Label(main_frame, text="正在准备下载模型...")
-        self.status_label.pack(pady=(0, 5))
-        
-        # 模型路径信息
-        models_dir = os.path.join(os.getcwd(), "models")
-        path_frame = ttk.Frame(main_frame)
-        path_frame.pack(fill=tk.X, pady=(0, 5))
-        path_label = ttk.Label(path_frame, text="模型存储路径:")
-        path_label.pack(side=tk.LEFT)
-        path_value = ttk.Label(path_frame, text=models_dir)
-        path_value.pack(side=tk.LEFT, padx=(5, 0))
-        
-        # 进度条框架
-        progress_frame = ttk.Frame(main_frame)
-        progress_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # 进度条
-        self.progress_bar = ttk.Progressbar(progress_frame, length=100, mode='determinate')
-        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # 进度百分比标签
-        self.progress_label = ttk.Label(progress_frame, text="0%")
-        self.progress_label.pack(side=tk.LEFT, padx=(5, 0))
-        
-        # 日志显示区域
-        log_frame = ttk.LabelFrame(main_frame, text="日志输出")
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        
-        # 使用等宽字体显示日志，以确保进度条正确显示
-        self.log_text = tk.Text(log_frame, wrap=tk.WORD, height=20, font=('Courier New', 10))
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.log_text.tag_configure("info", foreground="black")
-        self.log_text.tag_configure("warning", foreground="orange")
-        self.log_text.tag_configure("error", foreground="red")
-        self.log_text.tag_configure("success", foreground="green")
-        self.log_text.tag_configure("progress", foreground="blue")
-        
-        # 添加进度条专用标签
-        for i in range(10):
-            tag_name = f"progress_line_{i}"
-            self.log_text.tag_configure(tag_name, foreground="blue", font=('Courier New', 10))
-        
-        # 滚动条
-        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_text.config(yscrollcommand=scrollbar.set)
-        
-        # 按钮框架
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X)
-        
-        # 取消按钮
-        self.cancel_button = ttk.Button(button_frame, text="取消", command=self.cancel)
-        self.cancel_button.pack(pady=5)
-        
-        # 初始化取消标志
-        self.cancelled = False
-        
-        # 创建标准输出重定向器
-        self.stdout_redirector = StdoutRedirector(self.log_text)
-        
-    def add_log(self, message, level="info"):
-        """添加日志到日志显示区域"""
-        if not hasattr(self, 'log_text'):
-            return
-            
-        try:
-            # 清除结尾的\r和\r\n，保持消息整洁
-            while message.endswith('\r') or message.endswith('\n'):
-                message = message.rstrip('\r\n')
-                
-            # 如果消息为空，不处理
-            if not message:
-                return
-                
-            self.log_text.config(state=tk.NORMAL)
-            
-            # 检查是否是进度条消息
-            is_progress_bar = ("%" in message and 
-                              ("|" in message or "bar" in message.lower()) and 
-                              "[" in message and 
-                              "]" in message)
-            
-            if is_progress_bar:
-                # 尝试找到消息中的最后一行(可能包含\r)
-                if '\r' in message:
-                    message = message.split('\r')[-1]
-                
-                # 对于进度条消息，使用等宽字体显示
-                self.log_text.insert(tk.END, message + "\n", "progress")
-                
-                # 尝试提取进度百分比
-                try:
-                    percent_part = message.split("%")[0]
-                    # 取最后一个数字作为百分比
-                    for word in reversed(percent_part.split()):
-                        if word.replace('.', '', 1).isdigit() and word.count('.') <= 1:
-                            percent = float(word)
-                            self.update_progress(percent / 100.0)
-                            break
-                except Exception:
-                    pass
-            else:
-                # 普通日志消息
-                self.log_text.insert(tk.END, message + "\n", level)
-            
-            self.log_text.see(tk.END)
-            self.log_text.config(state=tk.DISABLED)
-            
-            # 同时打印到控制台以便调试
-            print(f"[UI日志-{level}] {message}")
-            
-            # 更新UI响应
-            self.window.update_idletasks()
-        except Exception as e:
-            print(f"添加日志出错: {e}")
-            
-    def update_progress(self, progress):
-        """更新进度条"""
-        try:
-            # 确保进度值在0-1之间
-            progress = max(0.0, min(1.0, progress))
-            progress_percent = int(progress * 100)
-            
-            self.progress_bar['value'] = progress_percent
-            self.progress_label.config(text=f"{progress_percent}%")
-            
-            # 更新状态文本
-            if progress < 0.3:
-                self.status_label.config(text="正在准备模型...")
-            elif progress < 0.6:
-                self.status_label.config(text="正在下载模型文件...")
-            elif progress < 0.9:
-                self.status_label.config(text="正在加载模型...")
-            else:
-                self.status_label.config(text="模型加载完成")
-                
-            self.window.update_idletasks()
-        except Exception as e:
-            print(f"更新进度条出错: {e}")
-    
-    def cancel(self):
-        """取消加载"""
-        try:
-            # 设置取消标志
-            self.cancelled = True
-            self.add_log("用户取消模型加载", "warning")
-            
-            # 禁用取消按钮，防止重复点击
-            self.cancel_button.config(state=tk.DISABLED)
-            
-            # 更新状态信息
-            self.status_label.config(text="正在取消操作...")
-            
-            # 立即关闭窗口
-            self.window.after(500, self.close)
-        except Exception as e:
-            print(f"取消操作失败: {e}")
-            # 尝试直接关闭
-            self.close()
-        
-    def close(self):
-        """关闭窗口"""
-        try:
-            # 确保恢复原始标准输出
-            if hasattr(self, 'stdout_redirector') and hasattr(self.stdout_redirector, 'original_stdout'):
-                sys.stdout = self.stdout_redirector.original_stdout
-                
-            # 销毁窗口
-            self.window.destroy()
-        except Exception as e:
-            print(f"关闭窗口出错: {e}")
+        pass
 
 class TitanUI:
+    """大文本摘要系统UI"""
+    
     def __init__(self, root):
+        """初始化UI"""
         self.root = root
         self.root.title("TitanSummarizer - 大文本摘要系统")
+        self.root.geometry("1200x800")
+        self.root.minsize(800, 600)
         
-        # 设置窗口大小和位置
-        window_width = 1200
-        window_height = 800
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        x = (screen_width - window_width) // 2
-        y = (screen_height - window_height) // 2
-        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        # 绑定窗口关闭事件
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
-        # 创建日志记录器
-        self.logger = logging.getLogger("titan_ui")
-        
-        # 状态栏变量 - 确保在方法调用前初始化
-        self.status_var = tk.StringVar()
-        self.status_var.set("就绪")
-        
+        # 设置主题
+        style = ttk.Style()
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+            
         # 加载设置
         self.settings = self.load_settings()
         
         # 初始化变量
-        self.novel_path = None
-        self.novel_content = ""
-        self.chapters = []
-        self.current_chapter_index = -1
         self.summarizer = None
+        self.novel_chapters = []
+        self.current_chapter_index = None
+        self.is_generating = False
+        self.processing_queue = queue.Queue()
         
-        # 创建UI组件
+        # 创建菜单
         self.create_menu()
-        self.create_widgets()
         
-        # 状态栏
-        self.status_bar = ttk.Label(
+        # 创建主框架
+        self.main_frame = ttk.Frame(self.root, padding="10")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 创建控制栏
+        self.create_control_bar()
+        
+        # 创建文本区域
+        self.create_text_areas()
+        
+        # 创建状态栏
+        self.status_var = tk.StringVar(value="就绪")
+        status_bar = ttk.Label(
             self.root,
             textvariable=self.status_var,
-            font=('Microsoft YaHei UI', 9),
             relief=tk.SUNKEN,
-            anchor=tk.W
+            anchor=tk.W,
+            padding="5 2"
         )
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        # 加载默认小说 - 在状态栏创建后调用
+        # 尝试加载默认小说
         self.load_default_novel()
         
-        # 记录初始化完成
-        self.logger.info("TitanUI初始化完成")
+        # 启动处理队列线程
+        threading.Thread(target=self.process_queue, daemon=True).start()
         
+        # 禁用生成按钮，直到API初始化完成
+        self.generate_btn.config(state=tk.DISABLED)
+        self.generate_all_btn.config(state=tk.DISABLED)
+        
+        # 不再自动加载模型
+        # self.load_model()
+        
+        logger.info("TitanUI初始化完成")
+
     def load_settings(self):
         """加载设置"""
         try:
             with open("settings.json", "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
+                settings = json.load(f)
+                logger.info(f"成功加载设置: {settings}")
+                
+                # 确保设置中有deepseek-api模型
+                if settings.get("default_model") not in ["deepseek-api"]:
+                    settings["default_model"] = "deepseek-api"
+                    logger.info("更新设置为使用DeepSeek API")
+                    
+                # 移除device设置
+                if "default_device" in settings:
+                    del settings["default_device"]
+                    
+                return settings
+        except Exception as e:
+            logger.warning(f"加载设置失败，使用默认值: {str(e)}")
             return {
-                "default_model": "1.5B",
-                "default_device": "GPU" if torch.cuda.is_available() else "CPU",
-                "default_length": 20,
-                "chapter_pattern": r"第[零一二三四五六七八九十百千万]+章",
-                "target_language": "English",
+                "default_model": "deepseek-api",
+                "default_length": 100,
+                "default_novel": "novels/凡人修仙传_完整版.txt",
                 "theme": "clam"
             }
             
@@ -811,6 +151,7 @@ class TitanUI:
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="文件", menu=file_menu)
         file_menu.add_command(label="选择小说", command=self.select_novel)
+        file_menu.add_command(label="加载API", command=self.load_model)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.root.quit)
         
@@ -819,227 +160,517 @@ class TitanUI:
         menubar.add_cascade(label="编辑", menu=edit_menu)
         edit_menu.add_command(label="清空摘要", command=self.clear_summary)
         
-        # 设置菜单
-        settings_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="设置", menu=settings_menu)
-        settings_menu.add_command(label="选项", command=self.show_settings)
+        # 工具菜单
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="工具", menu=tools_menu)
+        tools_menu.add_command(label="运行API测试", command=self.run_model_test)
         
         # 帮助菜单
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="帮助", menu=help_menu)
         help_menu.add_command(label="关于", command=self.show_about)
-        
-    def create_widgets(self):
-        """创建UI组件"""
-        # 创建主框架
-        self.main_frame = ttk.Frame(self.root, padding="10")
-        self.main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 创建顶部控制栏
-        self.create_control_bar()
-        
-        # 创建文本区域
-        self.create_text_areas()
-        
+            
     def create_control_bar(self):
         """创建控制栏"""
         control_frame = ttk.Frame(self.main_frame)
-        control_frame.pack(fill=tk.X, pady=(0, 10))
+        control_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # 左侧控制区域
+        left_controls = ttk.Frame(control_frame)
+        left_controls.pack(side=tk.LEFT)
+
+        # 模型选择区域
+        model_frame = ttk.LabelFrame(left_controls, text="API设置")
+        model_frame.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # 模型标签和下拉框
+        ttk.Label(model_frame, text="API模型:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
         
-        # 模型选择
-        ttk.Label(control_frame, text="模型:").pack(side=tk.LEFT, padx=5)
-        self.model_var = tk.StringVar(value=self.settings.get("default_model", "1.5B"))
-        model_options = ["small", "medium", "large", "1.5B", "6B", "7B", "13B"]  # 使用固定的选项列表
-        model_combo = ttk.Combobox(
-            control_frame,
-            textvariable=self.model_var,
-            values=model_options,
-            state="readonly",
-            width=20
+        # 可用模型列表 - 现在只保留DeepSeek API选项
+        models = ["deepseek-api"]
+        
+        # 创建模型名称到显示名称的映射
+        self.model_display_map = {get_model_display_name(model): model for model in models}
+        
+        # 设置模型显示变量
+        self.model_display_var = tk.StringVar(value=get_model_display_name("deepseek-api"))
+        
+        # 使用显示名称作为下拉菜单选项
+        self.model_var = tk.StringVar(value="deepseek-api")
+        self.model_selector = ttk.Combobox(
+            model_frame, 
+            textvariable=self.model_display_var,
+            values=list(self.model_display_map.keys()),
+            width=30,
+            state="readonly"
         )
-        model_combo.pack(side=tk.LEFT, padx=5)
-        
-        # 设备选择
-        ttk.Label(control_frame, text="设备:").pack(side=tk.LEFT, padx=5)
-        self.device_var = tk.StringVar(value=self.settings.get("default_device", "GPU"))
-        device_combo = ttk.Combobox(
-            control_frame,
-            textvariable=self.device_var,
-            values=["GPU", "CPU"],
-            state="readonly",
-            width=10
-        )
-        device_combo.pack(side=tk.LEFT, padx=5)
-        
-        # 加载模型按钮
-        self.load_button = ttk.Button(
-            control_frame,
-            text="加载模型",
+        self.model_selector.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        self.model_selector.current(0)  # 默认选择第一个模型
+
+        # 添加初始化API按钮
+        self.load_btn = ttk.Button(
+            model_frame,
+            text="初始化API",
             command=self.load_model
         )
-        self.load_button.pack(side=tk.LEFT, padx=5)
+        self.load_btn.grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+
+        # 添加摘要模式选择
+        mode_frame = ttk.LabelFrame(left_controls, text="摘要模式")
+        mode_frame.pack(side=tk.LEFT, padx=5, pady=5)
         
-        # 生成/停止按钮
-        self.generate_button = ttk.Button(
-            control_frame,
-            text="生成摘要",
-            command=self.toggle_generation
+        # 创建单选按钮变量和选项
+        self.summary_mode = tk.StringVar(value="extractive")
+        ttk.Radiobutton(
+            mode_frame, 
+            text="提取式摘要", 
+            variable=self.summary_mode, 
+            value="extractive"
+        ).grid(row=0, column=0, padx=5, pady=2, sticky=tk.W)
+        
+        ttk.Radiobutton(
+            mode_frame, 
+            text="生成式摘要", 
+            variable=self.summary_mode, 
+            value="generative"
+        ).grid(row=1, column=0, padx=5, pady=2, sticky=tk.W)
+        
+        # 添加模式说明提示
+        mode_info = ttk.Label(
+            mode_frame, 
+            text="提示: 提取式摘要更快，生成式质量更高", 
+            font=("Microsoft YaHei UI", 8)
         )
-        self.generate_button.pack(side=tk.LEFT, padx=5)
-        
-        # 语言选择
-        ttk.Label(control_frame, text="目标语言:").pack(side=tk.LEFT, padx=5)
-        self.target_lang_var = tk.StringVar(value=self.settings.get("target_language", "English"))
-        lang_combo = ttk.Combobox(
-            control_frame,
-            textvariable=self.target_lang_var,
-            values=["English", "Japanese", "Korean", "French", "German"],
-            state="readonly",
-            width=15
+        mode_info.grid(row=2, column=0, padx=5, pady=1, sticky=tk.W)
+
+        # 摘要长度选择区域
+        length_frame = ttk.LabelFrame(left_controls, text="摘要长度")
+        length_frame.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # 摘要长度标签和输入框
+        ttk.Label(length_frame, text="长度限制:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        self.length_var = tk.StringVar(value="100")
+        length_entry = ttk.Entry(length_frame, textvariable=self.length_var, width=5)
+        length_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        length_entry.bind("<KeyRelease>", self.validate_length)
+        ttk.Label(length_frame, text="字").grid(row=0, column=2, padx=0, pady=5, sticky=tk.W)
+
+        # 右侧按钮区域
+        right_buttons = ttk.Frame(control_frame)
+        right_buttons.pack(side=tk.RIGHT)
+
+        # 生成摘要按钮
+        self.generate_btn = ttk.Button(
+            right_buttons, 
+            text="生成摘要", 
+            command=self.generate_summary, 
+            style="Accent.TButton",
+            state=tk.DISABLED  # 初始状态为禁用
         )
-        lang_combo.pack(side=tk.LEFT, padx=5)
-        
-        # 翻译按钮
-        self.translate_button = ttk.Button(
-            control_frame,
-            text="翻译",
-            command=self.translate_text
+        self.generate_btn.pack(side=tk.RIGHT, padx=5, pady=5)
+
+        # 生成所有摘要按钮
+        self.generate_all_btn = ttk.Button(
+            right_buttons, 
+            text="生成所有章节摘要", 
+            command=self.summarize_all_chapters,
+            state=tk.DISABLED  # 初始状态为禁用
         )
-        self.translate_button.pack(side=tk.LEFT, padx=5)
-        
-        # 设置按钮状态
-        self.update_button_states()
-        
+        self.generate_all_btn.pack(side=tk.RIGHT, padx=5, pady=5)
+
+        # 清空摘要按钮
+        ttk.Button(
+            right_buttons, 
+            text="清空摘要", 
+            command=self.clear_summary
+        ).pack(side=tk.RIGHT, padx=5, pady=5)
+
+        # 打开文件按钮
+        ttk.Button(
+            right_buttons, 
+            text="打开小说文件", 
+            command=self.select_novel
+        ).pack(side=tk.RIGHT, padx=5, pady=5)
+
     def create_text_areas(self):
         """创建文本区域"""
-        # 创建左右分栏
-        paned = ttk.PanedWindow(self.main_frame, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True)
+        # 创建章节列表和文本区域的容器 (使用PanedWindow)
+        text_frame = ttk.PanedWindow(self.main_frame, orient=tk.HORIZONTAL)
+        text_frame.pack(fill=tk.BOTH, expand=True)
         
-        # 左侧章节列表区域
-        left_frame = ttk.Frame(paned)
-        paned.add(left_frame, weight=1)
+        # 左侧: 章节列表
+        left_frame = ttk.Frame(text_frame)
         
-        chapter_label_frame = ttk.LabelFrame(left_frame, text="章节列表")
-        chapter_label_frame.pack(fill=tk.BOTH, expand=True)
+        # 章节列表标题
+        ttk.Label(left_frame, text="章节列表", font=("Microsoft YaHei UI", 10, "bold")).pack(fill=tk.X, pady=(0, 5))
         
-        # 创建章节列表
-        self.chapter_list = ttk.Treeview(
-            chapter_label_frame,
-            columns=("title", "length", "status"),
-            show="headings"
-        )
-        self.chapter_list.heading("title", text="章节标题")
-        self.chapter_list.heading("length", text="长度")
-        self.chapter_list.heading("status", text="状态")
-        self.chapter_list.column("title", width=300)
-        self.chapter_list.column("length", width=100)
-        self.chapter_list.column("status", width=100)
-        self.chapter_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # 章节列表
+        columns = ("标题", "长度", "状态")
+        self.chapter_list = ttk.Treeview(left_frame, columns=columns, show="headings", height=20)
+        for col in columns:
+            self.chapter_list.heading(col, text=col)
+            self.chapter_list.column(col, width=80)
         
-        # 绑定点击事件
-        self.chapter_list.bind("<<TreeviewSelect>>", self.on_chapter_select)
+        # 设置列宽度
+        self.chapter_list.column("标题", width=150)
+        self.chapter_list.column("长度", width=70)
+        self.chapter_list.column("状态", width=70)
         
         # 添加滚动条
-        scrollbar = ttk.Scrollbar(chapter_label_frame, orient=tk.VERTICAL, command=self.chapter_list.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar = ttk.Scrollbar(left_frame, orient="vertical", command=self.chapter_list.yview)
         self.chapter_list.configure(yscrollcommand=scrollbar.set)
         
-        # 右侧区域
-        right_frame = ttk.Frame(paned)
-        paned.add(right_frame, weight=2)
+        # 章节列表绑定事件
+        self.chapter_list.bind("<<TreeviewSelect>>", self.on_chapter_select)
         
-        # 创建上下分栏
-        right_paned = ttk.PanedWindow(right_frame, orient=tk.VERTICAL)
-        right_paned.pack(fill=tk.BOTH, expand=True)
+        # 包装章节列表和滚动条
+        self.chapter_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # 原文区域
-        original_frame = ttk.Frame(right_paned)
-        right_paned.add(original_frame, weight=2)
+        # 添加到PanedWindow
+        text_frame.add(left_frame, weight=1)
         
-        original_label_frame = ttk.LabelFrame(original_frame, text="原文")
-        original_label_frame.pack(fill=tk.BOTH, expand=True)
+        # 右侧: 内容和摘要 (上下排列)
+        right_paned = ttk.PanedWindow(text_frame, orient=tk.VERTICAL)
+        text_frame.add(right_paned, weight=3)
         
-        self.original_text = scrolledtext.ScrolledText(
-            original_label_frame,
+        # 上部: 原文
+        mid_frame = ttk.Frame(right_paned)
+        
+        ttk.Label(mid_frame, text="原文", font=("Microsoft YaHei UI", 10, "bold")).pack(fill=tk.X, pady=(0, 5))
+        
+        self.content_text = scrolledtext.ScrolledText(
+            mid_frame,
             wrap=tk.WORD,
-            font=('Microsoft YaHei UI', 10)
+            font=("Microsoft YaHei UI", 10)
         )
-        self.original_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.content_text.pack(fill=tk.BOTH, expand=True)
         
-        # 摘要区域
-        summary_frame = ttk.Frame(right_paned)
-        right_paned.add(summary_frame, weight=1)
+        # 添加到垂直PanedWindow
+        right_paned.add(mid_frame, weight=2)
         
-        summary_label_frame = ttk.LabelFrame(summary_frame, text="摘要")
-        summary_label_frame.pack(fill=tk.BOTH, expand=True)
+        # 下部: 摘要
+        bottom_frame = ttk.Frame(right_paned)
+        
+        ttk.Label(bottom_frame, text="摘要", font=("Microsoft YaHei UI", 10, "bold")).pack(fill=tk.X, pady=(0, 5))
         
         self.summary_text = scrolledtext.ScrolledText(
-            summary_label_frame,
+            bottom_frame,
             wrap=tk.WORD,
-            font=('Microsoft YaHei UI', 10)
+            font=("Microsoft YaHei UI", 10)
         )
-        self.summary_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.summary_text.pack(fill=tk.BOTH, expand=True)
         
-    def update_button_states(self, enable=True):
-        """更新界面按钮状态"""
-        try:
-            # 更新生成摘要按钮状态
-            if hasattr(self, "generate_button"):
-                if enable and self.summarizer:
-                    self.generate_button.config(state=tk.NORMAL)
-                else:
-                    self.generate_button.config(state=tk.DISABLED)
-                    
-            # 更新翻译按钮状态
-            if hasattr(self, "translate_button"):
-                if enable and self.summarizer:
-                    self.translate_button.config(state=tk.NORMAL)
-                else:
-                    self.translate_button.config(state=tk.DISABLED)
-                    
-            # 更新加载按钮状态 - 总是可用
-            if hasattr(self, "load_button"):
-                self.load_button.config(state=tk.NORMAL)
+        # 添加到垂直PanedWindow
+        right_paned.add(bottom_frame, weight=1)
+    
+    def load_model(self):
+        """初始化DeepSeek API"""
+        # 获取选择的模型名称
+        model_display = self.model_display_var.get()
+        model_name = self.model_display_map.get(model_display, "deepseek-api")
+        self.model_var.set(model_name)  # 更新实际模型名称
+        
+        # 更新状态
+        self.update_status(f"正在初始化API: {model_display}")
+        
+        # 禁用按钮，防止重复点击
+        self.model_selector.config(state="disabled")
+        self.load_btn.config(state="disabled")
+        self.generate_btn.config(state="disabled")
+        self.generate_all_btn.config(state="disabled")
+        
+        # 在后台线程中初始化API
+        def init_api_in_background():
+            try:
+                # 初始化摘要器
+                self.summarizer = TitanSummarizer(
+                    model_size=model_name,
+                    progress_callback=self.update_progress_log
+                )
                 
-            logger.debug(f"按钮状态已更新: enable={enable}")
-        except Exception as e:
-            logger.error(f"更新按钮状态失败: {str(e)}")
-
-    def get_novel_files(self):
-        """获取novels目录中的所有小说文件"""
-        novel_files = []
-        if os.path.exists("novels"):
-            novel_files = [f for f in os.listdir("novels") if f.endswith(".txt")]
-        return novel_files
-
+                # 完成后在UI线程更新界面
+                self.root.after(0, self.update_ui_after_model_loaded)
+                
+            except Exception as e:
+                error_message = str(e)
+                
+                # 更新UI
+                def show_error():
+                    messagebox.showerror("API初始化失败", f"初始化API时出错: {error_message}")
+                    self.update_status(f"API初始化失败: {error_message}")
+                    self.model_selector.config(state="readonly")
+                    self.load_btn.config(state="normal")
+                
+                self.root.after(0, show_error)
+        
+        # 启动初始化线程
+        threading.Thread(target=init_api_in_background, daemon=True).start()
+    
+    def toggle_generation(self):
+        """切换摘要生成状态"""
+        # 检查API是否已初始化
+        if not self.summarizer:
+            messagebox.showinfo("提示", "请先点击初始化API按钮")
+            return
+        
+        if self.is_generating:
+            # 停止生成
+            self.is_generating = False
+            self.generate_btn.config(text="生成摘要")
+            self.update_status("摘要生成已停止")
+        else:
+            # 开始生成
+            self.generate_summary()
+    
+    def generate_summary(self):
+        """生成摘要"""
+        # 检查API是否已初始化
+        if not self.summarizer:
+            messagebox.showerror("错误", "请先初始化DeepSeek API")
+            return
+        
+        # 获取当前章节内容
+        current_item = self.chapter_list.selection()
+        if not current_item:
+            messagebox.showerror("错误", "请先选择一个章节")
+            return
+        
+        # 获取当前章节内容和索引
+        chapter_idx = self.chapter_list.index(current_item[0])
+        chapter_content = self.novel_chapters[chapter_idx]['content']
+        if not chapter_content.strip():
+            messagebox.showerror("错误", "所选章节内容为空")
+            return
+        
+        # 获取摘要长度
+        try:
+            max_length = int(self.length_var.get())
+            if max_length <= 0:
+                raise ValueError("摘要长度必须大于0")
+        except ValueError as e:
+            messagebox.showerror("错误", f"无效的摘要长度: {str(e)}")
+            return
+        
+        # 获取摘要模式
+        summary_mode = self.summary_mode.get()
+        
+        # 禁用生成按钮
+        self.generate_btn.configure(state="disabled")
+        self.update_status("正在生成摘要...")
+        
+        # 清空摘要区域
+        self.summary_text.delete(1.0, tk.END)
+        self.summary_text.insert(tk.END, "正在生成摘要，请稍候...\n")
+        
+        # 在后台线程中生成摘要
+        def generate_in_background():
+            try:
+                # 使用带摘要模式参数的方法生成摘要
+                start_time = time.time()
+                summary = self.summarizer.generate_summary(
+                    chapter_content, 
+                    max_length=max_length,
+                    summary_mode=summary_mode
+                )
+                end_time = time.time()
+                
+                # 计算处理时间和摘要长度
+                process_time = end_time - start_time
+                summary_length = len(summary)
+                
+                # 更新UI线程中的结果
+                def update_ui():
+                    self.summary_text.delete(1.0, tk.END)
+                    self.summary_text.insert(tk.END, summary)
+                    
+                    # 更新章节状态
+                    self.chapter_list.item(
+                        current_item, 
+                        values=(
+                            self.novel_chapters[chapter_idx]['title'],
+                            f"{len(chapter_content)}字",
+                            "已摘要"
+                        )
+                    )
+                    
+                    # 保存摘要到章节数据
+                    self.novel_chapters[chapter_idx]['summary'] = summary
+                    
+                    # 显示完成信息
+                    mode_text = "提取式" if summary_mode == "extractive" else "生成式"
+                    self.update_status(
+                        f"{mode_text}摘要已生成: {summary_length}字，耗时{process_time:.2f}秒"
+                    )
+                    
+                    # 启用生成按钮
+                    self.generate_btn.configure(state="normal")
+                
+                # 在UI线程中更新界面
+                self.root.after(0, update_ui)
+                
+            except Exception as e:
+                # 显示错误
+                def show_error():
+                    self.summary_text.delete(1.0, tk.END)
+                    error_message = f"生成摘要失败: {str(e)}"
+                    self.summary_text.insert(tk.END, error_message)
+                    self.update_status(error_message)
+                    self.generate_btn.configure(state="normal")
+                
+                self.root.after(0, show_error)
+        
+        # 启动后台线程
+        threading.Thread(target=generate_in_background, daemon=True).start()
+    
+    def update_ui_after_model_loaded(self):
+        """模型加载后更新UI状态"""
+        if self.summarizer:
+            self.generate_btn.config(state=tk.NORMAL)
+            self.generate_all_btn.config(state=tk.NORMAL)
+            
+            # 获取模型名称和友好显示名称
+            model_name = self.model_var.get()
+            display_name = get_model_display_name(model_name)
+            
+            # 更新状态栏
+            self.update_status(f"已初始化API: {display_name}")
+            logger.info(f"已初始化API: {model_name}")
+        else:
+            self.generate_btn.config(state=tk.DISABLED)
+            self.generate_all_btn.config(state=tk.DISABLED)
+            
+            # 更新状态栏
+            self.update_status("API初始化失败")
+            logger.error("API初始化失败")
+    
+    def batch_summary(self):
+        """批量生成多个章节的摘要"""
+        # 获取选中的章节
+        selected = self.chapter_list.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请先选择要生成摘要的章节")
+            return
+            
+        if not self.summarizer:
+            messagebox.showinfo("提示", "请先初始化DeepSeek API")
+            return
+        
+        # 获取并验证摘要参数
+        try:
+            max_length = int(self.length_var.get())
+            if max_length <= 0:
+                messagebox.showerror("错误", "摘要长度必须是正整数")
+                return
+        except ValueError:
+            messagebox.showerror("错误", "摘要长度必须是数字")
+            return
+        
+        # 清空当前摘要
+        self.clear_summary()
+        
+        # 显示进度条
+        progress_dialog = tk.Toplevel(self.root)
+        progress_dialog.title("批量生成摘要")
+        progress_dialog.geometry("300x120")
+        progress_dialog.transient(self.root)
+        progress_dialog.grab_set()
+        
+        ttk.Label(progress_dialog, text="正在生成摘要...").pack(pady=(10, 5))
+        
+        progress_var = tk.DoubleVar()
+        progress = ttk.Progressbar(
+            progress_dialog,
+            variable=progress_var,
+            maximum=len(selected),
+            mode="determinate"
+        )
+        progress.pack(fill=tk.X, padx=20, pady=5)
+        
+        status_var = tk.StringVar(value="准备中...")
+        status_label = ttk.Label(progress_dialog, textvariable=status_var)
+        status_label.pack(pady=5)
+        
+        # 创建摘要生成函数
+        def generate_batch_summaries():
+            try:
+                # 处理队列
+                for i, item in enumerate(selected):
+                    idx = self.chapter_list.index(item)
+                    chapter = self.novel_chapters[idx]
+                    
+                    # 更新进度条
+                    progress_var.set(i)
+                    status_var.set(f"处理: {chapter['title']}")
+                    progress_dialog.update()
+                    
+                    # 生成摘要
+                    content = chapter['content']
+                    try:
+                        summary = self.summarizer.generate_summary(content, max_length=max_length)
+                        
+                        # 保存摘要
+                        self.novel_chapters[idx]['summary'] = summary
+                        
+                        # 更新摘要文本框
+                        self.summary_text.insert(tk.END, f"\n{chapter['title']}\n")
+                        self.summary_text.insert(tk.END, "-" * 50 + "\n")
+                        self.summary_text.insert(tk.END, summary + "\n")
+                        
+                        # 更新章节列表状态
+                        self.chapter_list.item(item, values=(
+                            chapter['title'].split('\n')[0],
+                            f"{len(content)}字",
+                            "已生成"
+                        ))
+                        
+                    except Exception as e:
+                        error_message = str(e)
+                        logger.error(f"生成章节 '{chapter['title']}' 摘要时出错: {error_message}")
+                        # 继续处理下一个章节，而不是中断
+                        continue
+                        
+                # 关闭进度条
+                progress_dialog.destroy()
+                
+                # 更新状态
+                self.update_status("批量摘要生成完成")
+            except Exception as e:
+                error_message = str(e)
+                progress_dialog.destroy()
+                self.root.after(0, lambda: messagebox.showerror("错误", f"批量生成摘要时出错: {error_message}"))
+                self.update_status("批量摘要生成失败")
+        
+        # 启动生成线程
+        threading.Thread(target=generate_batch_summaries, daemon=True).start()
+    
     def load_default_novel(self):
         """加载默认小说"""
-        try:
-            # 查找可能的小说文件
-            default_candidates = [
-                "novels/凡人修仙传_完整版.txt",
-                "novels/凡人修仙传.txt"
-            ]
-            
-            # 添加novels目录下的所有小说文件
-            for novel_file in self.get_novel_files():
-                default_candidates.append(f"novels/{novel_file}")
-            
-            # 尝试加载小说文件
-            for novel_path in default_candidates:
-                if os.path.exists(novel_path):
-                    self.update_status(f"正在加载默认小说: {novel_path}")
+        default_novel = self.settings.get("default_novel")
+        if default_novel and os.path.exists(default_novel):
+            logger.info(f"尝试加载默认小说: {default_novel}")
+            self.load_novel(default_novel)
+        else:
+            logger.warning(f"默认小说不存在: {default_novel}")
+            # 尝试加载novels目录下的任何小说
+            novels_dir = "novels"
+            if os.path.exists(novels_dir):
+                novel_files = [f for f in os.listdir(novels_dir) if f.endswith(".txt")]
+                if novel_files:
+                    novel_path = os.path.join(novels_dir, novel_files[0])
+                    logger.info(f"尝试加载找到的小说: {novel_path}")
                     self.load_novel(novel_path)
-                    return
-            
-            # 如果没有找到小说文件
-            self.update_status("未找到默认小说文件，请将小说文件放入novels目录")
-            
-        except Exception as e:
-            self.update_status(f"加载默认小说失败: {str(e)}")
-
-    def load_novel(self, file_path: str):
+    
+    def select_novel(self):
+        """选择小说文件对话框"""
+        file_path = filedialog.askopenfilename(
+            title="选择小说文件",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
+        )
+        if file_path:
+            self.load_novel(file_path)
+    
+    def load_novel(self, file_path):
         """加载小说文件"""
         try:
             self.update_status(f"正在加载小说: {file_path}")
@@ -1052,6 +683,7 @@ class TitanUI:
                 try:
                     with open(file_path, 'r', encoding=encoding) as f:
                         content = f.read()
+                    logger.info(f"成功使用编码 {encoding} 读取文件")
                     break
                 except UnicodeDecodeError:
                     continue
@@ -1061,392 +693,79 @@ class TitanUI:
             
             if not content:
                 logger.error("所有编码均无法读取文件内容")
-                self.update_status("无法读取文件，请检查文件编码")
+                messagebox.showerror("错误", "无法读取文件，请检查文件编码")
+                return
+                
+            # 检查文件内容
+            if not content.strip():
+                messagebox.showerror("错误", "文件内容为空")
                 return
                 
             # 清空章节列表
             for item in self.chapter_list.get_children():
                 self.chapter_list.delete(item)
-            
+                
             # 分割章节
-            self.chapters = []
+            self.novel_chapters = []
             pattern = r"第[零一二三四五六七八九十百千万]+章\s*[^\n]+"
             matches = list(re.finditer(pattern, content))
             
             if not matches:
-                # 尝试其他模式
-                other_patterns = [
-                    r"第\s*\d+章\s*[^\n]+",    # 第 123章 标题
-                    r"第\d+章\s*[^\n]+",       # 第123章 标题
-                    r"Chapter\s*\d+\s*[^\n]+"  # Chapter 123 标题
-                ]
-                
-                for pattern in other_patterns:
-                    matches = list(re.finditer(pattern, content))
-                    if matches:
-                        break
-            
-            if not matches:
-                self.update_status("未检测到章节，请检查文件格式")
-                logger.error("尝试所有模式后仍未检测到章节")
-                return
-                
-            # 处理第一章之前的内容
-            if matches[0].start() > 0:
-                self.chapters.append({
-                    'title': "前言",
-                    'content': content[:matches[0].start()].strip(),
+                messagebox.showinfo("提示", "未找到章节标记，将整个文件作为一章处理")
+                self.novel_chapters.append({
+                    'title': os.path.basename(file_path),
+                    'content': content,
                     'summary': None
                 })
-            
-            # 处理所有章节
-            chapter_count = 0
-            for i in range(len(matches)):
-                start = matches[i].start()
-                end = matches[i + 1].start() if i < len(matches) - 1 else len(content)
+            else:
+                # 处理第一章之前的内容
+                if matches[0].start() > 0:
+                    self.novel_chapters.append({
+                        'title': "前言",
+                        'content': content[:matches[0].start()].strip(),
+                        'summary': None
+                    })
                 
-                chapter_title = matches[i].group().strip()
-                chapter_content = content[start:end].strip()
-                
-                self.chapters.append({
-                    'title': chapter_title,
-                    'content': chapter_content,
-                    'summary': None
-                })
-                chapter_count += 1
+                # 处理各章节
+                for i in range(len(matches)):
+                    start_match = matches[i]
+                    chapter_title = start_match.group(0)
+                    start = start_match.start()
+                    
+                    if i < len(matches) - 1:
+                        end = matches[i + 1].start()
+                    else:
+                        end = len(content)
+                        
+                    chapter_content = content[start:end].strip()
+                    
+                    self.novel_chapters.append({
+                        'title': chapter_title,
+                        'content': chapter_content,
+                        'summary': None
+                    })
             
             # 更新章节列表
-            for i, chapter in enumerate(self.chapters):
+            for i, chapter in enumerate(self.novel_chapters):
                 title = chapter['title'].split('\n')[0]  # 只显示第一行作为标题
                 length = len(chapter['content'])
                 status = "已生成" if chapter.get("summary") else "未生成"
                 self.chapter_list.insert("", "end", values=(title, f"{length}字", status))
                 
-            self.update_status(f"成功加载小说，共{len(self.chapters)}章")
-            logger.info(f"成功加载小说，共{len(self.chapters)}章")
+            self.update_status(f"成功加载小说，共{len(self.novel_chapters)}章")
+            logger.info(f"成功加载小说，共{len(self.novel_chapters)}章")
             
             # 保存当前小说路径
-            self.novel_path = file_path
+            self.settings["default_novel"] = file_path
+            
+            # 清空文本区域
+            self.content_text.delete("1.0", tk.END)
+            self.summary_text.delete("1.0", tk.END)
             
         except Exception as e:
-            self.update_status(f"加载小说失败: {str(e)}")
+            messagebox.showerror("错误", f"加载小说失败: {str(e)}")
             logger.error(f"加载小说失败: {str(e)}", exc_info=True)
-        
-    def load_model(self):
-        """加载模型"""
-        try:
-            # 获取模型大小和设备设置
-            model_size = self.model_var.get()
-            device = "cuda" if self.device_var.get() == "GPU" and torch.cuda.is_available() else "cpu"
-            
-            # 创建加载窗口
-            loading_window = LoadingWindow(self.root)
-            
-            # 启动后台线程加载模型
-            threading.Thread(
-                target=self.load_model_task, 
-                args=(loading_window, model_size, device), 
-                daemon=True
-            ).start()
-            
-        except Exception as e:
-            self.logger.error(f"加载模型时发生错误: {str(e)}")
-            messagebox.showerror("错误", f"加载模型失败: {str(e)}")
     
-    def load_model_task(self, loading_window, model_size, device):
-        """在后台线程中加载模型的任务"""
-        # 保存原始标准输出
-        original_stdout = sys.stdout
-        
-        try:
-            # 重定向标准输出到UI
-            sys.stdout = loading_window.stdout_redirector
-            
-            # 添加初始日志
-            loading_window.add_log("开始加载模型...", "info")
-            loading_window.add_log(f"模型规格: {model_size}", "info")
-            loading_window.add_log(f"设备: {device}", "info")
-            
-            # 显示模型将下载到的路径
-            models_dir = os.path.join(os.getcwd(), "models")
-            loading_window.add_log(f"模型将下载到: {models_dir}", "info")
-            
-            # 创建progress_callback函数来更新UI
-            def progress_callback(progress, message, file_progress=None):
-                # 检查是否取消 - 如果取消了立即返回True
-                if loading_window.cancelled:
-                    loading_window.add_log("检测到取消请求，停止模型加载", "warning")
-                    return True  # 返回True以通知TitanSummarizer停止加载
-                
-                # 处理不同类型的消息
-                if isinstance(message, str):
-                    # 正常的消息字符串
-                    loading_window.add_log(message)
-                elif isinstance(progress, str):
-                    # 有时候Transformers库会将进度条字符串作为第一个参数传递
-                    loading_window.add_log(progress)
-                
-                # 如果有数值进度，更新进度条
-                if isinstance(progress, (int, float)) and 0 <= progress <= 1:
-                    loading_window.update_progress(progress)
-                
-                # 返回取消状态
-                return loading_window.cancelled
-            
-            # 创建TitanSummarizer实例并加载模型
-            self.summarizer = None  # 重置之前的实例
-            
-            # 如果用户取消了，提前结束
-            if loading_window.cancelled:
-                loading_window.add_log("加载过程被取消", "warning")
-                sys.stdout = original_stdout
-                return
-                
-            # 创建实例并加载模型
-            try:
-                loading_window.add_log("开始创建模型实例...", "info")
-                self.summarizer = TitanSummarizer(model_size, device, progress_callback)
-                
-                # 模型加载完成后的处理
-                if not loading_window.cancelled and self.summarizer is not None and hasattr(self.summarizer, 'model') and self.summarizer.model is not None:
-                    loading_window.add_log("模型加载完成!", "success")
-                    loading_window.update_progress(1.0)
-                    
-                    # 更新UI按钮状态
-                    self.root.after(0, lambda: self.update_button_states(True))
-                    
-                    # 延迟关闭窗口，让用户有时间看到最终状态
-                    time.sleep(1)
-                    
-                    # 如果没有取消，自动关闭窗口
-                    if not loading_window.cancelled:
-                        loading_window.close()
-                elif loading_window.cancelled:
-                    loading_window.add_log("模型加载被用户取消", "warning")
-            except KeyboardInterrupt:
-                loading_window.add_log("模型加载被中断", "warning")
-                loading_window.cancelled = True
-            except Exception as e:
-                loading_window.add_log(f"模型加载过程中发生错误: {str(e)}", "error")
-                loading_window.cancelled = True
-                
-        except Exception as e:
-            # 恢复原始标准输出
-            sys.stdout = original_stdout
-            
-            error_message = f"模型加载失败: {str(e)}"
-            print(error_message)  # 输出到控制台
-            
-            if loading_window and not loading_window.cancelled:
-                try:
-                    loading_window.add_log(error_message, "error")
-                    loading_window.add_log(traceback.format_exc(), "error")
-                    # 延迟关闭窗口，让用户有时间看到错误信息
-                    time.sleep(3)
-                    loading_window.close()
-                except Exception as ui_error:
-                    print(f"显示错误信息失败: {ui_error}")
-        finally:
-            # 恢复原始标准输出
-            sys.stdout = original_stdout
-        
-    def update_ui_after_model_loaded(self):
-        """模型加载后更新UI"""
-        try:
-            # 启用相关按钮
-            self.update_button_states(True)
-            
-            # 更新状态
-            self.update_status("模型加载完成")
-        except Exception as e:
-            logger.error(f"更新UI失败: {str(e)}")
-
-    def select_novel(self):
-        """选择小说文件"""
-        file_path = filedialog.askopenfilename(
-            title="选择小说文件",
-            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
-        )
-        
-        if file_path:
-            self.load_novel(file_path)
-            
-    def toggle_generation(self):
-        """切换生成/停止状态"""
-        if self.is_generating:
-            self.stop_generation()
-        else:
-            self.start_generation()
-            
-    def start_generation(self):
-        """开始生成摘要"""
-        if not self.summarizer:
-            self.update_status("请先加载模型")
-            return
-            
-        selected = self.chapter_list.selection()
-        if not selected:
-            self.update_status("请选择要生成摘要的章节")
-            return
-            
-        self.is_generating = True
-        self.generate_button.config(text="停止生成")
-        self.update_status("正在生成摘要...")
-        
-        # 获取选中章节的索引
-        indices = [self.chapter_list.index(item) for item in selected]
-        
-        # 添加到处理队列
-        self.processing_queue.put(("generate", indices))
-        
-    def stop_generation(self):
-        """停止生成摘要"""
-        self.is_generating = False
-        self.generate_button.config(text="生成摘要")
-        self.update_status("已停止生成")
-        
-    def translate_text(self):
-        """翻译文本"""
-        if not self.summarizer:
-            self.update_status("请先加载模型")
-            return
-            
-        # 获取当前选中的章节
-        selected = self.chapter_list.selection()
-        if not selected:
-            self.update_status("请选择要翻译的章节")
-            return
-            
-        # 获取目标语言
-        target_lang = self.target_lang_var.get()
-        self.update_status(f"正在翻译为{target_lang}...")
-        
-        # 获取选中章节的索引
-        indices = [self.chapter_list.index(item) for item in selected]
-        
-        # 添加到处理队列
-        self.processing_queue.put(("translate", indices, target_lang))
-        
-    def process_queue(self):
-        """处理队列中的任务"""
-        while True:
-            try:
-                task = self.processing_queue.get()
-                task_type = task[0]
-                
-                if task_type == "generate":
-                    indices = task[1]
-                    self.generate_chapter_summaries(indices)
-                elif task_type == "translate":
-                    indices, target_lang = task[1:]
-                    self.translate_chapters(indices, target_lang)
-                    
-            except Exception as e:
-                self.update_status(f"处理任务时出错: {str(e)}")
-                
-    def generate_chapter_summaries(self, indices: list):
-        """生成选中章节的摘要"""
-        for i in indices:
-            if not self.is_generating:
-                break
-                
-            chapter = self.chapters[i]
-            self.summary_text.insert(tk.END, f"\n{chapter['title']}\n")
-            self.summary_text.insert(tk.END, "-" * 50 + "\n")
-            
-            def update_callback(new_text: str):
-                if self.is_generating:
-                    self.root.after(0, self.update_output, new_text)
-                    
-            try:
-                summary = self.summarizer.generate_summary(
-                    chapter['content'],
-                    max_length=self.settings.get("default_length", 20),
-                    callback=update_callback
-                )
-                
-                # 保存摘要
-                chapter["summary"] = summary
-                self.refresh_chapter_list()
-                
-            except Exception as e:
-                self.update_status(f"生成章节摘要失败: {str(e)}")
-                
-        if self.is_generating:
-            self.is_generating = False
-            self.generate_button.config(text="生成摘要")
-            self.update_status("摘要生成完成")
-            
-    def translate_chapters(self, indices: list, target_lang: str):
-        """翻译选中章节"""
-        for i in indices:
-            chapter = self.chapters[i]
-            
-            # 翻译原文
-            original_prompt = f"请将以下中文文本翻译为{target_lang}：\n\n{chapter['content']}\n\n翻译："
-            
-            def update_original_callback(new_text: str):
-                self.root.after(0, self.update_original_translation, new_text)
-                
-            try:
-                original_translation = self.summarizer.generate_summary(
-                    original_prompt,
-                    max_length=len(chapter['content']) * 2,
-                    callback=update_original_callback
-                )
-                
-                # 如果有摘要，也翻译摘要
-                if chapter.get("summary"):
-                    summary_prompt = f"请将以下中文文本翻译为{target_lang}：\n\n{chapter['summary']}\n\n翻译："
-                    
-                    def update_summary_callback(new_text: str):
-                        self.root.after(0, self.update_summary_translation, new_text)
-                        
-                    summary_translation = self.summarizer.generate_summary(
-                        summary_prompt,
-                        max_length=len(chapter['summary']) * 2,
-                        callback=update_summary_callback
-                    )
-                    
-            except Exception as e:
-                self.update_status(f"翻译章节失败: {str(e)}")
-                
-        self.update_status("翻译完成")
-        
-    def update_original_translation(self, text: str):
-        """更新原文翻译"""
-        self.original_text.delete('1.0', tk.END)
-        self.original_text.insert('1.0', text)
-        self.original_text.see(tk.END)
-        
-    def update_summary_translation(self, text: str):
-        """更新摘要翻译"""
-        self.summary_text.delete('1.0', tk.END)
-        self.summary_text.insert('1.0', text)
-        self.summary_text.see(tk.END)
-        
-    def update_output(self, text: str):
-        """更新输出文本"""
-        self.summary_text.insert(tk.END, text)
-        self.summary_text.see(tk.END)
-        
-    def clear_summary(self):
-        """清空摘要"""
-        self.summary_text.delete('1.0', tk.END)
-        self.update_status("已清空摘要")
-        
-    def update_status(self, message: str):
-        """更新状态栏"""
-        self.status_var.set(message)
-        
-    def show_settings(self):
-        """显示设置窗口"""
-        SettingsWindow(self.root, self.settings)
-        
-    def show_about(self):
-        """显示关于窗口"""
-        AboutWindow(self.root)
-        
     def on_chapter_select(self, event):
         """章节选择事件处理"""
         selected = self.chapter_list.selection()
@@ -1454,49 +773,466 @@ class TitanUI:
             return
             
         # 获取选中章节的索引
-        index = self.chapter_list.index(selected[0])
-        chapter = self.chapters[index]
+        i = self.chapter_list.index(selected[0])
+        chapter = self.novel_chapters[i]
         
         # 显示原文
-        self.original_text.delete('1.0', tk.END)
-        self.original_text.insert('1.0', chapter['content'])
+        self.content_text.delete('1.0', tk.END)
+        self.content_text.insert('1.0', chapter['content'])
         
         # 如果有摘要，显示摘要
-        if chapter.get("summary"):
-            self.summary_text.delete('1.0', tk.END)
+        self.summary_text.delete('1.0', tk.END)
+        if chapter.get('summary'):
             self.summary_text.insert('1.0', chapter['summary'])
-        else:
-            self.summary_text.delete('1.0', tk.END)
+        
+    def clear_summary(self):
+        """清空摘要"""
+        self.summary_text.delete('1.0', tk.END)
+        self.update_status("已清空摘要")
+        
+    def process_queue(self):
+        """处理队列中的任务"""
+        while True:
+            try:
+                task = self.processing_queue.get(timeout=0.1)
+                if task:
+                    task()
+            except queue.Empty:
+                pass
+            except Exception as e:
+                logger.error(f"处理队列任务时出错: {str(e)}")
+            finally:
+                time.sleep(0.1)  # 避免CPU占用过高
+                
+    def update_status(self, message):
+        """更新状态栏消息"""
+        self.status_var.set(message)
+        self.root.update_idletasks()
+        logger.info(message)
+        
+    def update_progress_log(self, message, progress=None, file_progress=None):
+        """更新进度日志，用于API回调"""
+        # 记录到日志
+        logger.info(f"API进度: {message}")
+        
+        # 更新状态栏
+        status_msg = f"API: {message}"
+        
+        # 处理进度参数
+        if progress is not None:
+            # 确保 progress 是浮点数
+            try:
+                if isinstance(progress, str):
+                    # 如果是字符串，尝试转换为浮点数
+                    progress_float = 0.0  # 默认值
+                else:
+                    # 否则尝试直接转换
+                    progress_float = float(progress)
+                
+                # 转换为百分比
+                progress_percent = int(progress_float * 100)
+                status_msg += f" ({progress_percent}%)"
+            except (ValueError, TypeError):
+                # 如果转换失败，不添加百分比信息
+                pass
+        
+        self.update_status(status_msg)
+    
+    def show_about(self):
+        """显示关于对话框"""
+        messagebox.showinfo(
+            "关于 TitanSummarizer",
+            "TitanSummarizer 大文本摘要系统\n"
+            "版本: 1.0.0\n\n"
+            "基于DeepSeek API的中文小说章节摘要工具\n"
+            "支持批量摘要生成和多种格式小说"
+        )
         
     def run(self):
         """运行UI"""
         self.root.mainloop()
 
+    def validate_length(self, event):
+        """验证摘要长度"""
+        try:
+            max_length = int(self.length_var.get())
+            if max_length <= 0:
+                messagebox.showerror("错误", "摘要长度必须是正整数")
+                self.length_var.set(str(self.settings.get("default_length", 100)))
+        except ValueError:
+            messagebox.showerror("错误", "摘要长度必须是数字")
+            self.length_var.set(str(self.settings.get("default_length", 100)))
+
+    def summarize_all_chapters(self):
+        """生成所有章节的摘要"""
+        if not self.summarizer:
+            messagebox.showinfo("提示", "请先初始化DeepSeek API")
+            return
+            
+        if not self.novel_chapters:
+            messagebox.showinfo("提示", "请先加载小说")
+            return
+            
+        # 获取并验证摘要参数
+        try:
+            max_length = int(self.length_var.get())
+            if max_length <= 0:
+                messagebox.showerror("错误", "摘要长度必须是正整数")
+                return
+        except ValueError:
+            messagebox.showerror("错误", "摘要长度必须是数字")
+            return
+            
+        # 确认是否继续
+        total_chapters = len(self.novel_chapters)
+        if total_chapters > 20:
+            if not messagebox.askyesno("确认", f"小说共有{total_chapters}章，生成所有摘要可能需要较长时间。是否继续？"):
+                return
+        
+        # 清空当前摘要
+        self.clear_summary()
+        
+        # 显示进度对话框
+        progress_dialog = tk.Toplevel(self.root)
+        progress_dialog.title("生成全部章节摘要")
+        progress_dialog.geometry("400x150")
+        progress_dialog.transient(self.root)
+        progress_dialog.grab_set()
+        
+        ttk.Label(progress_dialog, text="正在生成摘要...", font=("Microsoft YaHei UI", 10, "bold")).pack(pady=(10, 5))
+        
+        progress_var = tk.DoubleVar()
+        progress = ttk.Progressbar(
+            progress_dialog,
+            variable=progress_var,
+            maximum=total_chapters,
+            mode="determinate"
+        )
+        progress.pack(fill=tk.X, padx=20, pady=5)
+        
+        status_var = tk.StringVar(value="准备中...")
+        status_label = ttk.Label(progress_dialog, textvariable=status_var, font=("Microsoft YaHei UI", 9))
+        status_label.pack(pady=5)
+        
+        time_var = tk.StringVar(value="预计剩余时间: 计算中...")
+        time_label = ttk.Label(progress_dialog, textvariable=time_var, font=("Microsoft YaHei UI", 9))
+        time_label.pack(pady=5)
+        
+        # 进度更新函数
+        def update_progress(current, total, chapter_title, elapsed_time):
+            progress_var.set(current)
+            status_var.set(f"处理: {chapter_title}")
+            
+            # 计算剩余时间
+            if current > 0:
+                avg_time = elapsed_time / current
+                remaining_time = avg_time * (total - current)
+                time_var.set(f"预计剩余时间: {int(remaining_time//60)}分{int(remaining_time%60)}秒")
+            
+            progress_dialog.update()
+        
+        # 在后台线程中处理
+        def generate_all_summaries():
+            try:
+                progress_var.set(0)
+                
+                summary_results = []
+                error_chapters = []
+                
+                # 获取摘要模式
+                # 默认使用生成式摘要模式
+                summary_mode = "generative"
+                # 如果存在模式选择变量，则使用它
+                if hasattr(self, 'mode_var') and self.mode_var.get():
+                    summary_mode = self.mode_var.get()
+                
+                for i, chapter in enumerate(self.novel_chapters):
+                    # 更新进度
+                    progress_var.set(i / len(self.novel_chapters) * 100)
+                    status_var.set(f"生成章节 {i+1}/{len(self.novel_chapters)}: {chapter['title']}")
+                    progress_dialog.update()
+                    
+                    try:
+                        # 生成摘要
+                        summary = self.summarizer.generate_summary(
+                            chapter['content'], 
+                            max_length=max_length,
+                            summary_mode=summary_mode
+                        )
+                        
+                        # 记录结果
+                        self.novel_chapters[i]['summary'] = summary
+                        summary_results.append((chapter['title'], summary))
+                        
+                        # 更新列表状态
+                        item_id = self.chapter_list.get_children()[i]
+                        self.chapter_list.item(item_id, values=(
+                            chapter['title'].split('\n')[0],
+                            f"{len(chapter['content'])}字",
+                            "已生成"
+                        ))
+                    except Exception as e:
+                        # 记录错误但继续处理
+                        error_message = str(e)
+                        logger.error(f"生成章节 '{chapter['title']}' 摘要时出错: {error_message}")
+                        error_chapters.append(chapter['title'])
+                        continue
+                
+                # 完成生成
+                progress_var.set(100)
+                progress_dialog.destroy()
+                
+                # 在UI线程中显示结果
+                def show_completion():
+                    # 显示摘要结果
+                    self.summary_text.delete('1.0', tk.END)
+                    
+                    if error_chapters:
+                        self.summary_text.insert(tk.END, "以下章节生成失败:\n")
+                        for title in error_chapters:
+                            self.summary_text.insert(tk.END, f"- {title}\n")
+                        self.summary_text.insert(tk.END, "\n" + "-"*50 + "\n\n")
+                    
+                    for title, summary in summary_results:
+                        self.summary_text.insert(tk.END, f"{title}\n")
+                        self.summary_text.insert(tk.END, "-"*50 + "\n")
+                        self.summary_text.insert(tk.END, f"{summary}\n\n")
+                        
+                    mode_text = "提取式" if summary_mode == "extractive" else "生成式"
+                    self.update_status(f"全部章节摘要生成完成，使用{mode_text}模式，{len(error_chapters)}个失败")
+                    
+                    # 如果只有一章，直接显示结果
+                    if len(self.novel_chapters) == 1 and self.novel_chapters[0].get('summary'):
+                        self.summary_text.delete('1.0', tk.END)
+                        self.summary_text.insert(tk.END, self.novel_chapters[0]['summary'] + "\n")
+                
+                self.root.after(0, show_completion)
+                
+            except Exception as e:
+                error_message = str(e)
+                
+                def show_error():
+                    progress_dialog.destroy()
+                    messagebox.showerror("错误", f"生成全部章节摘要时出错: {error_message}")
+                    self.update_status("生成全部章节摘要失败")
+                
+                self.root.after(0, show_error)
+        
+        # 启动生成线程
+        threading.Thread(target=generate_all_summaries, daemon=True).start()
+
+    def save_settings(self):
+        """保存当前设置"""
+        try:
+            # 更新设置
+            if self.model_var.get():
+                self.settings["default_model"] = self.model_var.get()
+                
+            if self.length_var.get():
+                try:
+                    self.settings["default_length"] = int(self.length_var.get())
+                except ValueError:
+                    pass
+            
+            # 写入文件
+            with open("settings.json", "w", encoding="utf-8") as f:
+                json.dump(self.settings, f, ensure_ascii=False, indent=4)
+                
+            logger.info("设置已保存")
+        except Exception as e:
+            logger.error(f"保存设置失败: {str(e)}")
+
+    def on_closing(self):
+        """窗口关闭时的处理"""
+        try:
+            # 保存设置
+            self.save_settings()
+            
+            # 关闭窗口
+            self.root.destroy()
+        except Exception as e:
+            logger.error(f"关闭窗口时出错: {str(e)}")
+            self.root.destroy()
+
+    def on_model_select(self, event):
+        """模型选择事件处理"""
+        try:
+            # 获取选定的显示名称
+            if hasattr(self, 'model_display_var'):
+                selected_display = self.model_display_var.get()
+            else:
+                # 如果没有display变量，直接使用model_var
+                self.model_display_var = tk.StringVar(value=get_model_display_name("deepseek-api"))
+                selected_display = self.model_display_var.get()
+            
+            # 获取对应的实际模型名称
+            model_name = self.model_display_map[selected_display]
+            # 更新模型变量
+            self.model_var.set(model_name)
+            
+            # 如果新选择的模型与当前加载的不同，则加载新模型
+            if self.summarizer is None or self.summarizer.model_name != model_name:
+                # 自动加载选定的模型
+                self.load_model()
+        except Exception as e:
+            logger.error(f"模型选择时发生错误: {str(e)}")
+            messagebox.showerror("错误", f"模型选择时发生错误: {str(e)}")
+
+    def get_test_text(self, model_name):
+        """获取模型的测试文本"""
+        # 通用测试文本
+        common_tests = [
+            ("新闻文本", """人民网北京12月8日电（记者姜洁）12月8日，中央经济工作会议在北京举行。会议认为，今年是新中国成立70周年，是决胜全面建成小康社会第一个百年奋斗目标的关键之年。以习近平同志为核心的党中央团结带领全国各族人民，十分重视经济工作，高瞻远瞩、统揽全局、科学决策、果断施策，坚持稳中求进工作总基调，坚持以供给侧结构性改革为主线，推动高质量发展，扎实做好"六稳"工作。"""),
+            
+            ("小说文本", """周芷若冷笑道："是么？我倒要试他一试。"转过身去，低声道："赵姑娘，我们上去涤器室取些酒菜，待会儿下来奉陪众位师哥。"赵灵珠见她和祖千秋冷言相向，本已有些担忧，听她说不为难张无忌，这才放下了心，答道："好！"两个姑娘一起走开。张无忌道："师叔，适才多谢您相援。"殷梨亭道："大侄子，你吃了九阳神功的亏了。"张无忌微微一怔，道："干吗？"殷梨亭道："忘了你体内的九阳神功护体，竟会中她降龙十八掌的'潜龙勿用'之力。"张无忌一惊，忙道："啊，那怎么办？"殷梨亭道："事已如此，只好恕她这一掌之罪了。"张无忌心下难安，寻思："难道真的是我恃武凌人？将九阳神功的力道发了出来？"顺着这个思路想去，越想越觉有理。"""),
+        ]
+        
+        return common_tests
+
+    def run_model_test(self):
+        """运行选定模型的测试"""
+        if not self.summarizer:
+            messagebox.showinfo("提示", "请先初始化DeepSeek API")
+            return
+            
+        # 获取当前模型
+        model_name = self.model_var.get()
+        display_name = get_model_display_name(model_name)
+        
+        # 获取测试文本
+        test_texts = self.get_test_text(model_name)
+        if not test_texts:
+            messagebox.showinfo("提示", f"没有找到{display_name}的测试文本")
+            return
+            
+        # 验证摘要参数
+        try:
+            max_length = int(self.length_var.get())
+            if max_length <= 0:
+                messagebox.showerror("错误", "摘要长度必须是正整数")
+                return
+        except ValueError:
+            messagebox.showerror("错误", "摘要长度必须是数字")
+            return
+            
+        # 清空现有文本
+        self.content_text.delete("1.0", tk.END)
+        self.summary_text.delete("1.0", tk.END)
+        
+        # 创建测试窗口
+        test_window = tk.Toplevel(self.root)
+        test_window.title(f"{display_name} - API测试")
+        test_window.geometry("600x400")
+        test_window.transient(self.root)
+        
+        # 添加测试说明
+        ttk.Label(
+            test_window, 
+            text=f"{display_name} API测试", 
+            font=("Microsoft YaHei UI", 14, "bold")
+        ).pack(pady=(10, 5))
+        
+        ttk.Label(
+            test_window, 
+            text="正在对多种文本类型进行摘要生成测试", 
+            font=("Microsoft YaHei UI", 10)
+        ).pack(pady=(0, 20))
+        
+        # 创建进度条
+        progress_var = tk.DoubleVar()
+        progress = ttk.Progressbar(
+            test_window,
+            variable=progress_var,
+            maximum=len(test_texts),
+            mode="determinate"
+        )
+        progress.pack(fill=tk.X, padx=20, pady=10)
+        
+        # 创建结果文本框
+        result_text = scrolledtext.ScrolledText(
+            test_window,
+            wrap=tk.WORD,
+            font=("Microsoft YaHei UI", 10)
+        )
+        result_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # 运行测试
+        def run_tests():
+            for i, (title, text) in enumerate(test_texts):
+                # 更新进度
+                progress_var.set(i)
+                test_window.update()
+                
+                # 生成摘要
+                try:
+                    result_text.insert(tk.END, f"\n【{title}】\n{'-'*50}\n")
+                    result_text.insert(tk.END, f"原文 ({len(text)} 字):\n{text[:200]}...\n\n")
+                    
+                    # 生成摘要
+                    summary = self.summarizer.generate_summary(text, max_length=max_length)
+                    
+                    # 显示结果
+                    result_text.insert(tk.END, f"摘要 ({len(summary)} 字):\n{summary}\n\n")
+                    result_text.see(tk.END)
+                except Exception as e:
+                    result_text.insert(tk.END, f"生成摘要失败: {str(e)}\n\n")
+                
+                # 如果是最后一个文本，同时显示在主界面上
+                if i == len(test_texts) - 1:
+                    self.content_text.insert(tk.END, f"【{title}】\n\n{text}")
+                    self.summary_text.insert(tk.END, summary)
+            
+            # 更新最终进度
+            progress_var.set(len(test_texts))
+            
+            # 添加完成按钮
+            ttk.Button(
+                test_window,
+                text="完成",
+                command=test_window.destroy
+            ).pack(pady=10)
+        
+        # 在新线程中运行测试
+        threading.Thread(target=run_tests, daemon=True).start()
+
+def save_settings_file():
+    """创建默认设置文件"""
+    settings = {
+        "default_model": "deepseek-api",
+        "default_length": 100,
+        "default_novel": "novels/凡人修仙传_完整版.txt",
+        "theme": "clam"
+    }
+    
+    try:
+        with open("settings.json", "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=4)
+        logger.info("创建默认设置文件成功")
+    except Exception as e:
+        logger.error(f"创建设置文件失败: {str(e)}")
+
+
 def main():
     """主函数"""
     try:
-        # 配置日志
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.StreamHandler(),
-                logging.FileHandler("titan_ui.log", mode="w", encoding="utf-8")
-            ]
-        )
-        
         # 确保novels目录存在
         if not os.path.exists("novels"):
             os.makedirs("novels")
-            logging.info("创建novels目录")
+            logger.info("创建novels目录")
+            
+        # 确保设置文件存在
+        if not os.path.exists("settings.json"):
+            save_settings_file()
         
         # 创建并运行应用
         root = tk.Tk()
         app = TitanUI(root)
-        app.root.mainloop()
+        app.run()
+        
     except Exception as e:
-        logging.error(f"程序启动失败: {str(e)}", exc_info=True)
+        logger.error(f"程序启动失败: {str(e)}", exc_info=True)
         messagebox.showerror("错误", f"程序启动失败: {str(e)}")
+
 
 if __name__ == "__main__":
     main() 

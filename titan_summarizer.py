@@ -4,38 +4,37 @@
 """
 TitanSummarizer - 大文本摘要系统
 支持中文小说等长文本的摘要生成
+使用DeepSeek API进行云端摘要
 """
 
 import os
 import logging
-import torch
 import time
 import sys
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, AutoModel
-from transformers.utils import logging as transformers_logging
-from pathlib import Path
+import io
+import re
 from typing import Optional, List, Dict, Callable, Tuple
 from tqdm import tqdm
-import re
 
-# 导入模型名称映射
+# 导入DeepSeek API
+from deepseek_api import DeepSeekAPI
+
+# 导入辅助函数
 from get_model_name import MODELS, get_model_name
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger("TitanSummarizer")
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# 设置transformers的日志级别
-transformers_logging.set_verbosity_info()
+def available_devices():
+    """返回可用的设备列表"""
+    # 由于使用API，设备选择不再重要
+    return ["cpu"]
 
 class TitanSummarizer:
     def __init__(
         self,
-        model_size: str = "medium",
+        model_size: str = "deepseek-api",
         device: str = "cpu",
         progress_callback: Optional[Callable[[float, str, Optional[float]], None]] = None
     ) -> None:
@@ -43,168 +42,67 @@ class TitanSummarizer:
         初始化TitanSummarizer类
         
         Args:
-            model_size: 模型大小 (small/medium/large 或 1.5B/6B/7B/13B)
-            device: 设备 (cpu/cuda)
+            model_size: 模型大小 (默认为deepseek-api)
+            device: 设备 (不再使用)
             progress_callback: 进度回调函数，接收三个参数：进度(0-1)，消息，文件进度(0-100或None)
         """
         self.model_size = model_size
         self.device = device
         self.progress_callback = progress_callback
-        
-        # 设置模型下载位置 - 确保下载到当前目录的models文件夹
-        models_dir = os.path.join(os.getcwd(), "models")
-        if not os.path.exists(models_dir):
-            os.makedirs(models_dir)
-            logger.info(f"创建模型目录: {models_dir}")
-            
-        # 设置环境变量指定下载位置
-        os.environ["TRANSFORMERS_CACHE"] = models_dir
-        os.environ["HF_HOME"] = models_dir
-        os.environ["HF_DATASETS_CACHE"] = os.path.join(models_dir, "datasets")
-        os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(models_dir, "hub")
-        logger.info(f"设置模型下载路径: {models_dir}")
+        self.model_loaded = False
         
         # 确定模型名称 - 使用get_model_name函数
         self.model_name = get_model_name(model_size)
         logger.info(f"使用模型: {self.model_name} (来自参数: {model_size})")
         
-        self.tokenizer = None
-        self.model = None
+        # 初始化API客户端
+        self._init_api()
         
-        # 初始化模型和分词器
-        self._init_model()
-        
-    def _init_model(self) -> None:
-        """初始化大语言模型和分词器"""
+    def _init_api(self) -> None:
+        """初始化DeepSeek API客户端"""
         try:
-            # 设置缓存目录
-            models_dir = os.path.join(os.getcwd(), "models")
-            cache_dir = models_dir
+            # 报告开始初始化API
+            print("正在初始化DeepSeek API客户端...")
+            logger.info("初始化DeepSeek API客户端")
             
-            # 直接回调进度信息
-            def send_to_callback(message):
-                if self.progress_callback:
-                    self.progress_callback(None, message, None)
+            # 如果使用的不是deepseek-api，给出警告
+            if self.model_name != "deepseek-api":
+                logger.warning(f"注意：指定的模型 '{self.model_name}' 不是DeepSeek API，将被忽略")
+                print(f"注意：指定的模型 '{self.model_name}' 不是DeepSeek API，将被忽略")
+                
+            # 创建API客户端，默认使用模拟模式
+            self.api = DeepSeekAPI(use_mock=True)
             
-            # 报告开始加载
-            if self.progress_callback:
-                self.progress_callback(0.01, "开始加载模型和分词器...", None)
+            # 模拟短暂延迟，以保持与原代码的使用体验一致
+            time.sleep(1)
             
-            # 加载分词器
-            logger.info(f"从 {self.model_name} 加载分词器")
-            
-            # 加载分词器时把所有输出都发给回调函数
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name,
-                trust_remote_code=True,
-                cache_dir=cache_dir
-            )
-            
-            # 检查分词器类型
-            tokenizer_class = type(self.tokenizer).__name__
-            if self.progress_callback:
-                self.progress_callback(0.15, f"加载的分词器类型: {tokenizer_class}", None)
-                
-            # 加载模型配置
-            if self.progress_callback:
-                self.progress_callback(0.2, "加载模型配置...", None)
-                
-            # 获取模型配置
-            logger.info(f"从 {self.model_name} 加载模型配置")
-            model_config = AutoConfig.from_pretrained(
-                self.model_name,
-                trust_remote_code=True,
-                cache_dir=cache_dir
-            )
-                
-            # 尝试加载模型
-            try:
-                # 报告开始加载模型权重
-                if self.progress_callback:
-                    self.progress_callback(0.3, "加载模型权重...", None)
-                    
-                logger.info(f"从 {self.model_name} 加载模型")
-                
-                # 定义进度回调函数
-                def progress_callback_fn(progress, message):
-                    # 如果已经有progress_callback，直接传递消息
-                    if self.progress_callback:
-                        # 计算总体进度：30% + (下载进度 * 60%)
-                        if isinstance(progress, float) and 0 <= progress <= 1:
-                            overall_progress = 0.3 + progress * 0.6
-                        else:
-                            overall_progress = None
-                            
-                        # 发送消息，可能包含进度条
-                        return self.progress_callback(overall_progress, message, None)
-                    return False
-                
-                # 加载模型 - 尝试使用progress_callback参数
-                self.model = AutoModel.from_pretrained(
-                    self.model_name,
-                    config=model_config,
-                    trust_remote_code=True,
-                    torch_dtype=torch.float16 if self.device != "cpu" else torch.float32,
-                    device_map=self.device,
-                    cache_dir=cache_dir,
-                    progress_callback=progress_callback_fn
-                )
-            except Exception as e:
-                if "unexpected keyword argument 'progress_callback'" in str(e):
-                    # 如果不支持进度回调，显示警告并重新加载
-                    warning_msg = f"模型 {self.model_name} 不支持进度回调参数: {str(e)}"
-                    logger.warning(warning_msg)
-                    if self.progress_callback:
-                        self.progress_callback(0.3, warning_msg, None)
-                    
-                    # 通知将使用标准方式加载模型
-                    if self.progress_callback:
-                        self.progress_callback(0.31, "使用标准方式加载模型...", None)
-                    
-                    # 重新加载模型，不使用进度回调
-                    self.model = AutoModel.from_pretrained(
-                        self.model_name,
-                        config=model_config,
-                        trust_remote_code=True,
-                        torch_dtype=torch.float16 if self.device != "cpu" else torch.float32,
-                        device_map=self.device,
-                        cache_dir=cache_dir
-                    )
-                else:
-                    # 其它错误直接抛出
-                    raise e
-                
-            # 模型加载完成
-            if self.progress_callback:
-                self.progress_callback(0.95, "模型加载完成，进行最终设置...", None)
-                
-            # 设置为评估模式
-            self.model.eval()
-            
-            # 完成初始化
-            if self.progress_callback:
-                self.progress_callback(1.0, "模型加载完成!", None)
-                
-            logger.info("模型加载成功")
+            # 初始化完成
+            print("DeepSeek API客户端初始化完成!")
+            logger.info("DeepSeek API客户端初始化完成")
+            self.model_loaded = True
             
         except Exception as e:
-            error_msg = f"初始化模型失败: {str(e)}"
+            error_msg = f"初始化API客户端失败: {str(e)}"
             logger.error(error_msg)
-            if hasattr(self, 'progress_callback') and self.progress_callback:
-                self.progress_callback(0, error_msg, None)
+            print(error_msg)
             raise Exception(error_msg)
             
-    def _ensure_tokenizer_compatibility(self):
-        """确保分词器兼容性"""
-        logger.info("分词器兼容性检查完成")
-        return
+    def is_model_loaded(self) -> bool:
+        """
+        检查模型是否已加载完成
+        
+        Returns:
+            布尔值，表示API客户端是否已初始化完成
+        """
+        return self.model_loaded
             
     def generate_summary(
         self,
         text: str,
-        max_length: int = 20,
+        max_length: int = 200,
         callback: Optional[Callable[[str], None]] = None,
-        file_percentage: int = 0
+        file_percentage: int = 0,
+        summary_mode: str = "generative"  # 默认为生成式
     ) -> str:
         """
         生成文本摘要
@@ -214,53 +112,51 @@ class TitanSummarizer:
             max_length: 摘要最大长度
             callback: 实时回调函数
             file_percentage: 当前文件处理进度百分比
+            summary_mode: 摘要模式，支持"extractive"(提取式)和"generative"(生成式)
             
         Returns:
             生成的摘要
         """
         try:
-            # 构建输入
-            prompt = f"请为以下文本生成一个{max_length}字以内的摘要：\n\n{text}\n\n摘要："
+            # 检查API客户端是否已初始化完成
+            if not self.model_loaded:
+                error_msg = "API客户端尚未初始化完成，无法生成摘要"
+                logger.error(error_msg)
+                if self.progress_callback:
+                    self.progress_callback(0.0, error_msg, file_percentage)
+                return error_msg
             
             if self.progress_callback:
                 self.progress_callback(0.1, "正在处理文本...", file_percentage)
-                
-            # 编码输入
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
             
-            if self.progress_callback:
-                self.progress_callback(0.3, "正在生成摘要...", file_percentage)
-        
-            # 生成摘要
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_length=max_length * 2,  # 考虑中文编码
-                    num_beams=4,
-                    length_penalty=1.5,
-                    repetition_penalty=1.8,
-                    temperature=0.7,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id
-                )
+            # 使用extractive模式时，尝试实现简单的提取式摘要
+            if summary_mode == "extractive":
+                # 简单的提取式摘要实现
+                summary = self._extractive_summarize(text, max_length)
+            else:
+                # 使用DeepSeek API生成摘要
+                if self.progress_callback:
+                    self.progress_callback(0.3, "正在通过DeepSeek API生成摘要...", file_percentage)
                 
-            if self.progress_callback:
-                self.progress_callback(0.7, "正在处理输出...", file_percentage)
-                
-            # 解码输出
-            summary = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                try:
+                    # 调用API生成摘要
+                    summary = self.api.summarize_text(text, max_length=max_length)
+                    
+                    # 如果API返回失败，使用提取式摘要作为备选
+                    if not summary:
+                        logger.warning("API摘要生成失败，切换到提取式摘要")
+                        if self.progress_callback:
+                            self.progress_callback(0.5, "API摘要生成失败，切换到提取式摘要...", file_percentage)
+                        summary = self._extractive_summarize(text, max_length)
+                except Exception as e:
+                    logger.warning(f"API摘要生成出错，切换到提取式摘要: {str(e)}")
+                    if self.progress_callback:
+                        self.progress_callback(0.5, "API调用出错，切换到提取式摘要...", file_percentage)
+                    summary = self._extractive_summarize(text, max_length)
             
-            # 如果有回调，实时更新输出
-            if callback:
-                callback(summary)
-                
-            # 尝试提取摘要部分
-            if "摘要：" in summary:
-                summary = summary.split("摘要：")[1].strip()
-                
-            # 限制长度
-            if len(summary) > max_length * 3:  # 考虑中文字符可能导致的较长输出
-                summary = summary[:max_length * 3] + "..."
+            # 确保摘要长度不超过限制
+            if len(summary) > max_length:
+                summary = summary[:max_length] + "..."
                 
             if self.progress_callback:
                 self.progress_callback(1.0, "摘要生成完成", file_percentage)
@@ -268,12 +164,70 @@ class TitanSummarizer:
             return summary
             
         except Exception as e:
-            error_msg = f"生成摘要失败: {str(e)}"
+            error_msg = f"生成摘要时发生错误: {str(e)}"
             logger.error(error_msg)
             if self.progress_callback:
-                self.progress_callback(0, error_msg, file_percentage)
+                self.progress_callback(0.0, error_msg, file_percentage)
             return f"摘要生成失败: {str(e)}"
+    
+    def _extractive_summarize(self, text: str, max_length: int = 200) -> str:
+        """
+        简单的提取式摘要方法，作为API失败时的备选
+        
+        Args:
+            text: 输入文本
+            max_length: 摘要最大长度
             
+        Returns:
+            提取的摘要文本
+        """
+        # 分割文本为句子
+        sentences = re.split(r'(?<=[。！？.!?])', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        # 如果句子太少，直接返回原文
+        if len(sentences) <= 3:
+            return text[:max_length] + ("..." if len(text) > max_length else "")
+        
+        # 计算每个句子的重要性分数 (简单实现：句子长度 + 位置因素)
+        sentence_scores = []
+        for i, sentence in enumerate(sentences):
+            # 位置因素：开头和结尾的句子更重要
+            position_score = 1.0
+            if i < len(sentences) * 0.2:  # 开头20%的句子
+                position_score = 1.5
+            elif i > len(sentences) * 0.8:  # 结尾20%的句子
+                position_score = 1.2
+                
+            # 长度因素：中等长度的句子更重要
+            length_score = min(1.0, len(sentence) / 50)
+            
+            # 综合得分
+            score = position_score * length_score
+            sentence_scores.append((i, score))
+        
+        # 根据得分排序选择句子
+        sentence_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # 估算要选择的句子数量
+        avg_sentence_length = sum(len(s) for s in sentences) / len(sentences)
+        estimated_count = max(1, int(max_length / avg_sentence_length * 0.8))
+        
+        # 选择最重要的句子，但不超过原文的1/3
+        selected_count = min(estimated_count, len(sentences) // 3 + 1)
+        selected_indices = [score_tuple[0] for score_tuple in sentence_scores[:selected_count]]
+        selected_indices.sort()  # 按照原始顺序排列
+        
+        # 构建摘要
+        summary_sentences = [sentences[i] for i in selected_indices]
+        summary = "".join(summary_sentences)
+        
+        # 确保不超过最大长度
+        if len(summary) > max_length:
+            summary = summary[:max_length] + "..."
+            
+        return summary
+
     def translate_text(
         self,
         text: str,
@@ -286,124 +240,68 @@ class TitanSummarizer:
         Args:
             text: 输入文本
             target_language: 目标语言
-            callback: 实时回调函数
+            callback: 回调函数
             
         Returns:
             翻译后的文本
         """
         try:
-            # 构建输入
-            prompt = f"请将以下中文文本翻译为{target_language}：\n\n{text}\n\n翻译："
-            
-            # 编码输入
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-            
-            # 生成摘要
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_length=len(text) * 2,  # 翻译后文本可能变长
-                    num_beams=4,
-                    length_penalty=0.6,
-                    repetition_penalty=1.2,
-                    temperature=0.7,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id
-                )
+            # 检查API客户端是否已初始化完成
+            if not self.model_loaded:
+                error_msg = "API客户端尚未初始化完成，无法翻译文本"
+                logger.error(error_msg)
+                return error_msg
                 
-            # 解码输出
-            translation = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # 构建翻译提示词
+            prompt = f"请将以下文本翻译为{target_language}：\n\n{text}"
             
-            # 如果有回调，实时更新输出
-            if callback:
-                callback(translation)
-                
-            # 尝试提取翻译部分
-            if "翻译：" in translation:
-                translation = translation.split("翻译：")[1].strip()
+            # 调用API进行翻译
+            translation = self.api.summarize_text(prompt)
+            
+            if not translation:
+                return f"翻译失败，请检查API连接"
                 
             return translation
             
         except Exception as e:
-            error_msg = f"翻译文本失败: {str(e)}"
+            error_msg = f"翻译文本时发生错误: {str(e)}"
             logger.error(error_msg)
             return f"翻译失败: {str(e)}"
-            
-# 进度处理类
-class ProgressHandler:
-    def __init__(self, callback=None):
-        """初始化进度处理器"""
-        self.callback = callback
-        self.current_file = None
-        self.current_file_percentage = 0
-        
-    def __call__(self, progress, message, file_progress=None):
-        """处理进度更新"""
-        # 如果有文件进度信息，更新当前文件
-        if isinstance(message, str):
-            # 检查是否是下载消息
-            if message.startswith("Downloading "):
-                try:
-                    # 提取文件名
-                    filename = message.split("Downloading ")[1].split()[0]
-                    if filename != self.current_file:
-                        self.current_file = filename
-                        logger.info(f"正在下载: {filename}")
-                        
-                    # 检查文件进度
-                    if isinstance(file_progress, (int, float)):
-                        self.current_file_percentage = file_progress
-                        # 整体进度：30%基础进度 + 当前文件进度的50%
-                        overall_progress = 0.3 + (file_progress / 100.0) * 0.5
-                        
-                        # 调用回调函数
-                        if self.callback:
-                            return self.callback(overall_progress, message, file_progress)
-                except Exception as e:
-                    logger.error(f"处理下载进度信息失败: {e}")
-                
-            # 处理模型加载消息
-            elif "加载模型" in message:
-                if self.callback:
-                    return self.callback(0.8, message, None)
-            
-            # 其他消息直接传递
-            elif self.callback:
-                return self.callback(progress, message, None)
-                
-        return False  # 默认不中断处理
 
 def test_summarizer():
-    """测试摘要生成器"""
-    # 测试文本
+    """测试TitanSummarizer功能"""
+    # 实例化
+    summarizer = TitanSummarizer(model_size="deepseek-api", device="cpu")
+    
+    # 准备测试文本
     test_text = """
-    金庸的武侠小说《射雕英雄传》塑造了郭靖、黄蓉、洪七公、欧阳锋等经典人物。
-    故事从郭靖出生写起，写到郭靖黄蓉大婚为止。
-    主人公郭靖系金国将领郭啸天与包惜弱之子，郭啸天遭奸人所害，包惜弱带着未出世的儿子返回大宋。
-    郭靖自幼勤奋好学、倔强木讷，得到江南七怪、马钰、洪七公等人的传授武功。
-    他与聪明狡黠的黄蓉相知相爱，从桃花岛主黄药师处学得武功，闯荡江湖。
-    在他们闯荡江湖的同时，郭靖逐渐从一个懵懂少年变成了一个有理想有道德的侠士，终成一代英雄。
+    人工智能（Artificial Intelligence，简称AI）是一门研究如何使计算机模拟人类智能的学科。它涵盖了机器学习、深度学习、自然语言处理等多个领域。人工智能技术已经广泛应用于医疗、金融、教育等行业，极大地提高了工作效率和服务质量。
+    机器学习是人工智能的核心技术之一，它通过算法让计算机从数据中学习规律，进而做出决策或预测。深度学习则是机器学习的进阶版，它通过多层神经网络来处理复杂数据，模拟人脑的工作方式。
+    在自然语言处理方面，大型语言模型如GPT、BERT等取得了突破性进展，能够生成流畅的文本、回答问题、甚至创作诗歌和短篇小说。计算机视觉技术则让机器能够"看见"并理解图像和视频内容。
+    尽管人工智能技术飞速发展，但它仍面临诸多挑战，如道德伦理问题、隐私安全问题等。未来，人工智能有望在更多领域发挥作用，为人类社会创造更多价值。
     """
     
-    # 创建摘要生成器
-    summarizer = TitanSummarizer(model_size="1.5B")
+    print("===== 测试TitanSummarizer =====")
+    print(f"原文长度: {len(test_text)} 字符")
     
     # 生成摘要
-    def progress_callback(progress, message, file_progress):
-        """进度回调函数"""
-        if isinstance(progress, (int, float)):
-            print(f"进度: {progress * 100:.1f}%")
-        if message:
-            print(f"消息: {message}")
-        if file_progress:
-            print(f"文件进度: {file_progress:.1f}%")
-        return False  # 不中断处理
-        
-    summary = summarizer.generate_summary(test_text, callback=lambda x: print(f"生成: {x}"))
-    
-    # 打印摘要
-    print("\n最终摘要:")
+    print("\n生成式摘要:")
+    summary = summarizer.generate_summary(test_text, max_length=100, summary_mode="generative")
     print(summary)
+    print(f"摘要长度: {len(summary)} 字符")
+    
+    # 提取式摘要
+    print("\n提取式摘要:")
+    summary = summarizer.generate_summary(test_text, max_length=100, summary_mode="extractive")
+    print(summary)
+    print(f"摘要长度: {len(summary)} 字符")
+    
+    # 翻译
+    print("\n翻译测试:")
+    translation = summarizer.translate_text("人工智能正在改变世界", "English")
+    print(translation)
+    
+    print("\n===== 测试完成 =====")
 
 if __name__ == "__main__":
     test_summarizer() 

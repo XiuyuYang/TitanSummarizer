@@ -2,84 +2,92 @@
 # -*- coding: utf-8 -*-
 
 """
-获取模型名称的辅助函数
+模型名称映射模块
+提供模型名称的映射和处理功能
 """
 
-# 模型映射配置
+# 模型名称到实际模型位置的映射
 MODELS = {
-    "small": "deepseek-ai/deepseek-coder-1.3b-base",
-    "medium": "deepseek-ai/deepseek-coder-6.7b-base", 
-    "large": "deepseek-ai/deepseek-coder-33b-base",
-    # 兼容旧的模型大小参数
-    "1.5B": "deepseek-ai/deepseek-coder-1.3b-base",
-    "6B": "deepseek-ai/deepseek-coder-6.7b-base",
-    "7B": "deepseek-ai/deepseek-coder-6.7b-base",
-    "13B": "deepseek-ai/deepseek-coder-33b-base"
+    # 中文ALBERT模型
+    "tiny": "clue/albert_chinese_tiny",
+    "small": "clue/albert_chinese_small",
+    "base": "clue/albert_chinese_base",
+    
+    # GPT系列模型
+    "gpt2-small": "distilgpt2",
+    
+    # MT5模型
+    "mt5-small": "google/mt5-small",
+    "mt5-base": "google/mt5-base",
+    
+    # 常用中文大模型
+    "chatglm2-6b": "THUDM/chatglm2-6b",
+    "chatglm3-6b": "THUDM/chatglm3-6b",
+    "baichuan-7b": "Baichuan-Inc/Baichuan2-7B-Chat",
+    "deepseek-7b": "deepseek-ai/deepseek-llm-7b-chat",
+    
+    # 添加DeepSeek API模型
+    "deepseek-api": "deepseek-api"
 }
 
-def get_model_name(model_size: str) -> str:
+# 反向映射，用于显示名称
+DISPLAY_NAMES = {
+    "clue/albert_chinese_tiny": "ALBERT-Tiny (中文)",
+    "clue/albert_chinese_small": "ALBERT-Small (中文)",
+    "clue/albert_chinese_base": "ALBERT-Base (中文)",
+    "distilgpt2": "DistilGPT2 (英文)",
+    "google/mt5-small": "MT5-Small (多语言)",
+    "google/mt5-base": "MT5-Base (多语言)",
+    "THUDM/chatglm2-6b": "ChatGLM2-6B (中文)",
+    "THUDM/chatglm3-6b": "ChatGLM3-6B (中文)",
+    "Baichuan-Inc/Baichuan2-7B-Chat": "Baichuan2-7B (中文)",
+    "deepseek-ai/deepseek-llm-7b-chat": "DeepSeek-7B (中文)",
+    "deepseek-api": "DeepSeek API (云端)"
+}
+
+def get_model_name(model_identifier: str) -> str:
     """
-    根据模型大小参数获取模型名称
+    获取模型的全名
     
     Args:
-        model_size: 模型大小参数 (small/medium/large 或 1.5B/6B/7B/13B)
+        model_identifier: 模型标识符 (tiny/small/base/medium/large 或 huggingface模型名)
         
     Returns:
-        对应的模型名称
+        模型的全名
     """
-    return MODELS.get(model_size, MODELS["medium"])
+    # 如果是简写，查找对应的模型
+    if model_identifier.lower() in MODELS:
+        return MODELS[model_identifier.lower()]
     
+    # 如果找不到映射，直接返回原名称
+    return model_identifier
+
 def get_model_display_name(model_name: str) -> str:
     """
     获取模型的显示名称
     
     Args:
-        model_name: 模型名称 (如 deepseek-ai/deepseek-coder-6.7b-base)
+        model_name: 完整的模型名称
         
     Returns:
-        用户友好的显示名称
+        用于显示的友好名称
     """
-    model_display_names = {
-        "deepseek-ai/deepseek-coder-1.3b-base": "DeepSeek-Coder-1.3B (轻量版)",
-        "deepseek-ai/deepseek-coder-6.7b-base": "DeepSeek-Coder-6.7B (标准版)",
-        "deepseek-ai/deepseek-coder-33b-base": "DeepSeek-Coder-33B (增强版)",
-    }
-    return model_display_names.get(model_name, model_name.split("/")[-1])
-
-def get_folder_size(path):
-    """
-    获取文件夹大小
+    # 如果在反向映射中，返回对应的显示名称
+    if model_name in DISPLAY_NAMES:
+        return DISPLAY_NAMES[model_name]
     
-    Args:
-        path: 文件夹路径
-        
-    Returns:
-        文件夹大小（字节）
-    """
-    import os
-    total_size = 0
-    for dirpath, dirnames, filenames in os.walk(path):
-        for f in filenames:
-            fp = os.path.join(dirpath, f)
-            if os.path.exists(fp):
-                total_size += os.path.getsize(fp)
-    return total_size
-
-def get_readable_size(size_bytes):
-    """
-    将字节大小转换为人类可读格式
+    # 尝试查找更短的匹配
+    for key, display_name in DISPLAY_NAMES.items():
+        if key in model_name:
+            return display_name
     
-    Args:
-        size_bytes: 字节大小
-        
-    Returns:
-        人类可读的大小字符串
-    """
-    import math
-    if size_bytes == 0:
-        return "0 B"
-    size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_name[i]}" 
+    # 默认返回原名称
+    return model_name
+
+if __name__ == "__main__":
+    # 测试代码
+    test_names = ["tiny", "small", "THUDM/chatglm3-6b", "unknown-model"]
+    for name in test_names:
+        full_name = get_model_name(name)
+        display_name = get_model_display_name(full_name)
+        print(f"{name} -> {full_name} -> {display_name}") 
