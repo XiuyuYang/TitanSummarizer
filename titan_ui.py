@@ -542,7 +542,7 @@ class TitanUI:
                 # 创建Summarizer实例
                 self.summarizer = TitanSummarizer(
                     model_size=model_name,
-                    progress_callback=self.update_progress_log
+                    progress_callback=self.progress_callback_adapter
                 )
                 
                 # 如果是Ollama本地模型，需要加载具体的模型文件
@@ -648,7 +648,7 @@ class TitanUI:
             summary_length = self.summary_length_var.get()
             
             # 禁用生成按钮
-            self.generate_btn.config(state=tk.DISABLED)
+            self.generate_button.config(state=tk.DISABLED)
             self.generating = True
             
             # 清空摘要区域
@@ -664,12 +664,15 @@ class TitanUI:
                 args=(original_content, summary_mode, summary_length),
                 daemon=True
             ).start()
+            
+            return True
                 
         except Exception as e:
             self.generating = False
-            self.generate_btn.config(state=tk.NORMAL)
+            self.generate_button.config(state=tk.NORMAL)
             logger.error(f"生成摘要出错: {str(e)}", exc_info=True)
             messagebox.showerror("错误", f"生成摘要出错: {str(e)}")
+            return False
 
     def update_ui_after_model_loaded(self):
         """模型加载后更新UI状态"""
@@ -696,6 +699,9 @@ class TitanUI:
                 # 启用导出功能
                 if hasattr(self, 'export_button'):
                     self.export_button.config(state=tk.NORMAL)
+                
+                # 移除自动生成第一章摘要的功能
+                # self.root.after(1000, self.auto_generate_first_chapter_summary)
                     
             else:
                 logger.error("模型加载失败，summarizer.is_model_loaded() 返回 False 或方法不存在")
@@ -707,6 +713,81 @@ class TitanUI:
         except Exception as e:
             logger.error(f"更新UI状态出错: {str(e)}")
             
+    def auto_generate_first_chapter_summary(self):
+        """自动生成第一章摘要"""
+        try:
+            logger.info("开始自动生成第一章摘要")
+            
+            # 确保小说已加载
+            if not hasattr(self, 'novel_chapters') or not self.novel_chapters:
+                logger.warning("找不到小说章节，无法自动生成摘要")
+                return
+                
+            # 查找第一章（跳过前言）
+            first_chapter_index = 0
+            for i, chapter in enumerate(self.novel_chapters):
+                chapter_title = chapter['title'].split('\n')[0]
+                if "第一章" in chapter_title or "第1章" in chapter_title:
+                    first_chapter_index = i
+                    break
+            
+            # 如果找到了第一章，选中它并生成摘要
+            if first_chapter_index >= 0 and first_chapter_index < len(self.novel_chapters):
+                # 获取第一章的内容
+                first_chapter = self.novel_chapters[first_chapter_index]
+                chapter_title = first_chapter['title'].split('\n')[0]
+                logger.info(f"找到第一章: {chapter_title}")
+                
+                # 在章节列表中找到并选中第一章
+                if hasattr(self, 'chapter_list'):
+                    items = self.chapter_list.get_children()
+                    if items and first_chapter_index < len(items):
+                        # 选中第一章
+                        self.chapter_list.selection_set(items[first_chapter_index])
+                        self.chapter_list.focus(items[first_chapter_index])
+                        self.chapter_list.see(items[first_chapter_index])
+                        # 触发章节选择事件
+                        self.on_chapter_list_select(None)
+                        
+                        # 设置当前章节索引
+                        self.current_chapter_index = first_chapter_index
+                        
+                        # 在内容显示区域显示第一章内容
+                        self.original_text.delete("1.0", tk.END)
+                        self.original_text.insert(tk.END, first_chapter['content'])
+                        
+                        # 设置生成状态
+                        self.generating = True
+                        if hasattr(self, 'generate_button'):
+                            self.generate_button.config(text="停止生成", state=tk.NORMAL)
+                        if hasattr(self, 'stop_button'):
+                            self.stop_button.config(state=tk.NORMAL)
+                        
+                        # 生成摘要
+                        self.update_status(f"正在自动生成 '{chapter_title}' 的摘要...")
+                        
+                        # 获取摘要模式和长度
+                        summary_mode = self.summary_mode_var.get()
+                        summary_length = self.summary_length_var.get()
+                        
+                        # 在后台线程中生成摘要
+                        threading.Thread(
+                            target=self._generate_summary_thread, 
+                            args=(first_chapter['content'], summary_mode, summary_length),
+                            daemon=True
+                        ).start()
+                        
+                        logger.info(f"已启动第一章自动摘要生成线程，章节: {chapter_title}")
+                    else:
+                        logger.warning("章节列表为空或者索引无效，无法选择第一章")
+                else:
+                    logger.warning("找不到章节列表控件，无法选择第一章")
+            else:
+                logger.warning("未找到第一章，无法自动生成摘要")
+                
+        except Exception as e:
+            logger.error(f"自动生成第一章摘要出错: {str(e)}", exc_info=True)
+
     def generate_summary_text(self, original_content, summary_mode, length):
         """生成摘要文本"""
         try:
@@ -737,7 +818,7 @@ class TitanUI:
                     # 调用API生成摘要
                     summary = self.summarizer.generate_summary(
                         prompt, 
-                        max_tokens=length_tokens.get(length, 200)
+                        max_length=length_tokens.get(length, 200)
                     )
                     
                     return summary
@@ -1955,9 +2036,17 @@ class TitanUI:
             logger.error(f"生成摘要线程出错: {str(e)}", exc_info=True)
             self.root.after(0, lambda: self.handle_summary_error(str(e)))
         finally:
-            # 恢复生成按钮状态
-            self.root.after(0, lambda: self.generate_btn.config(state=tk.NORMAL))
-            self.generating = False
+            # 恢复UI状态
+            def reset_ui():
+                # 恢复生成按钮状态
+                if hasattr(self, 'generate_button'):
+                    self.generate_button.config(text="生成摘要", state=tk.NORMAL)
+                if hasattr(self, 'stop_button'):
+                    self.stop_button.config(state=tk.DISABLED)
+                # 重置生成状态
+                self.generating = False
+            
+            self.root.after(0, reset_ui)
 
     def browse_novels(self):
         """浏览和选择小说文件"""
@@ -2114,6 +2203,35 @@ class TitanUI:
         except Exception as e:
             logger.error(f"打开小说目录出错: {str(e)}", exc_info=True)
             messagebox.showerror("错误", f"打开小说目录出错: {str(e)}")
+
+    def progress_callback_adapter(self, progress, message, total=None):
+        """适配器方法，用于将TitanSummarizer的回调转换为update_progress_log格式"""
+        try:
+            # 如果参数顺序和类型不匹配，尝试进行推断和调整
+            # 确保progress是一个浮点数（范围0-1）
+            if isinstance(progress, str) and isinstance(message, (int, float)):
+                # 如果参数顺序被颠倒了，则交换它们
+                progress, message = message, progress
+                
+            # 确保progress是数值类型
+            if not isinstance(progress, (int, float)):
+                try:
+                    progress = float(progress)
+                except (ValueError, TypeError):
+                    progress = 0.0
+                    
+            # 确保total是有效的数值，如果为None则使用默认值100
+            if total is None or not isinstance(total, (int, float)):
+                total_value = 100
+            else:
+                total_value = total
+                
+            # 调用UI的进度更新方法，按照正确的参数顺序
+            self.update_progress_log(progress, total_value, message)
+        except Exception as e:
+            logger.error(f"进度回调适配器错误: {str(e)}")
+            # 在出错时，直接用最保守的参数调用更新方法
+            self.update_progress_log(0.0, 100, f"更新进度出错: {str(e)}")
 
 def save_settings_file():
     """创建默认设置文件"""
