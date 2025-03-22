@@ -1,107 +1,37 @@
-# TitanSummarizer - 基于Transformer的小说摘要生成器
+# Qwen 2 模型测试工具
 
-TitanSummarizer是一个强大的中文小说摘要生成工具，使用最先进的Transformer深度学习模型自动生成高质量摘要。
+这个Python脚本用于通过Ollama运行本地的Qwen 2 0.5B模型并进行测试。
 
-## 功能特点
+## 前提条件
 
-- **基于Transformer的摘要生成**：使用预训练的BART、T5等模型生成高质量摘要
-- **章节自动检测**：智能识别小说章节，支持多种章节标记格式
-- **两种摘要模式**：支持按章节摘要和全文摘要
-- **GPU加速**：支持CUDA加速，大幅提高处理速度
-- **友好的图形界面**：简洁直观的用户界面，易于操作
-- **详细的处理日志**：实时显示处理进度和结果
-- **自动保存结果**：自动保存摘要和详细信息
+1. 安装Ollama：
+   - 从[Ollama官网](https://ollama.ai/download)下载并安装Ollama
 
-## 安装
+2. 安装Python依赖：
+   ```
+   pip install requests
+   ```
 
-### 环境要求
-
-- Python 3.7+
-- PyTorch 1.7+
-- Transformers 4.0+
-- PyQt5
-
-### 安装步骤
-
-1. 克隆仓库：
-```bash
-git clone https://github.com/yourusername/TitanSummarizer.git
-cd TitanSummarizer
-```
-
-2. 安装依赖：
-```bash
-pip install -r requirements.txt
-```
+3. 确保模型文件存在于指定路径：
+   ```
+   D:\Work\AI_Models\Qwen\Qwen2-0.5B-Instruct-GGUF\qwen2-0_5b-instruct-q4_k_m.gguf
+   ```
 
 ## 使用方法
 
-### 图形界面
+1. 运行Python脚本：
+   ```
+   python run_qwen_with_ollama.py
+   ```
 
-启动图形界面：
+2. 脚本会自动执行以下操作：
+   - 检查Ollama服务是否运行，如果没有会尝试启动
+   - 创建名为"qwen2-0.5b"的模型（如果不存在）
+   - 向模型发送测试提示并显示返回的结果
 
-```bash
-python transformer_ui.py
-```
+## 注意事项
 
-界面操作：
-1. 点击"浏览..."选择小说文件
-2. 选择预训练模型
-3. 设置摘要长度
-4. 选择摘要模式（按章节或全文）
-5. 选择计算设备（CPU或GPU）
-6. 点击"开始生成摘要"
-
-### 命令行使用
-
-也可以通过命令行直接使用：
-
-```bash
-python transformer_summarizer.py --file_path 小说文件路径 --model bart-base-chinese --by_chapter --max_summary_length 150
-```
-
-参数说明：
-- `--file_path`：小说文件路径（必需）
-- `--model`：预训练模型，可选值：bart-base-chinese, mt5-small-chinese, cpt-base
-- `--by_chapter`：按章节生成摘要（默认为全文摘要）
-- `--max_summary_length`：摘要最大长度（默认150）
-- `--output_path`：输出文件路径（可选）
-- `--device`：计算设备，可选值：cpu, cuda
-
-## 支持的模型
-
-目前支持以下预训练模型：
-
-- **bart-base-chinese**：中文BART模型，适合一般中文小说
-- **mt5-small-chinese**：多语言T5模型，支持中文
-- **cpt-base**：中文预训练Transformer模型
-
-## 输出文件
-
-程序会在小说文件所在目录下创建`summaries`文件夹，并生成以下文件：
-
-- `小说名_transformer_summary.txt`：生成的摘要文本
-- `小说名_transformer_summary_detail.json`：详细的摘要信息，包括每章节的原文长度、摘要长度、压缩比等
-
-## 示例
-
-以《凡人修仙传》为例：
-
-```bash
-python transformer_summarizer.py --file_path novels/凡人修仙传_完整版.txt --model bart-base-chinese --by_chapter
-```
-
-## 常见问题
-
-**Q: 程序运行很慢怎么办？**  
-A: 建议使用GPU加速。如果没有GPU，可以选择较小的模型如mt5-small-chinese，或减少摘要长度。
-
-**Q: 如何提高摘要质量？**  
-A: 可以尝试不同的预训练模型，或调整摘要长度参数。
-
-**Q: 支持哪些文件格式？**  
-A: 目前主要支持txt文本文件，程序会自动检测文件编码。
-
-## 许可证
-
-MIT License 
+- 脚本会自动创建一个名为"Modelfile"的临时文件
+- 确保Ollama可执行文件在系统PATH中
+- 如果Ollama服务无法启动，请确保已正确安装Ollama并手动启动服务后再运行脚本
+- 修改脚本中的MODEL_PATH变量如果模型文件位置不同 

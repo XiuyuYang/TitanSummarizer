@@ -27,7 +27,10 @@ MODELS = {
     "deepseek-7b": "deepseek-ai/deepseek-llm-7b-chat",
     
     # 添加DeepSeek API模型
-    "deepseek-api": "deepseek-api"
+    "deepseek-api": "deepseek-api",
+    
+    # 添加Ollama本地模型
+    "ollama-local": "ollama-local"
 }
 
 # 反向映射，用于显示名称
@@ -42,7 +45,8 @@ DISPLAY_NAMES = {
     "THUDM/chatglm3-6b": "ChatGLM3-6B (中文)",
     "Baichuan-Inc/Baichuan2-7B-Chat": "Baichuan2-7B (中文)",
     "deepseek-ai/deepseek-llm-7b-chat": "DeepSeek-7B (中文)",
-    "deepseek-api": "DeepSeek API (云端)"
+    "deepseek-api": "DeepSeek API (云端)",
+    "ollama-local": "Ollama 本地模型"
 }
 
 def get_model_name(model_identifier: str) -> str:
@@ -86,7 +90,7 @@ def get_model_display_name(model_name: str) -> str:
 
 if __name__ == "__main__":
     # 测试代码
-    test_names = ["tiny", "small", "THUDM/chatglm3-6b", "unknown-model"]
+    test_names = ["tiny", "small", "THUDM/chatglm3-6b", "unknown-model", "ollama-local"]
     for name in test_names:
         full_name = get_model_name(name)
         display_name = get_model_display_name(full_name)
