@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
@@ -73,7 +73,10 @@ class TitanUI:
         self.novels_dir = "novels"  # 默认小说目录
         self.main_frame = ttk.Frame(self.root, padding="10")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
-            
+        
+        # 初始化消息队列
+        self.summarize_queue = queue.Queue()
+        
         # 加载设置
         self.settings = self.load_settings()
         
@@ -143,6 +146,9 @@ class TitanUI:
                 logger.warning("无默认本地模型路径，不自动加载模型")
         else:
             logger.info(f"未识别的默认模型类型: {default_model}，不自动加载模型")
+        
+        # 启动队列处理
+        self.root.after(100, self.process_summarize_queue)
 
     def load_settings(self):
         """加载设置"""
@@ -249,12 +255,18 @@ class TitanUI:
         # 模型选择下拉框
         ttk.Label(gen_frame, text="模型:").grid(row=0, column=0, padx=2, pady=2, sticky=tk.W)
         self.model_var = tk.StringVar(value="请选择大模型")
-        self.model_combobox = ttk.Combobox(gen_frame, textvariable=self.model_var, state="readonly", width=25)
-        
-        # 添加默认选项和本地模型列表
+
+        # 自动计算最长模型名称宽度
         model_values = ["请选择大模型"]
         if hasattr(self, 'local_models') and self.local_models:
             model_values.extend(sorted(self.local_models.keys()))
+
+        # 找出最长的模型名称
+        max_model_length = max([len(model) for model in model_values]) if model_values else 25
+        # 确保宽度至少为25个字符，并且基于最长的名称进行调整
+        combobox_width = max(40, max_model_length + 5)
+
+        self.model_combobox = ttk.Combobox(gen_frame, textvariable=self.model_var, state="readonly", width=combobox_width)
         self.model_combobox["values"] = model_values
         self.model_combobox.current(0)  # 设置默认选中第一项
         self.model_combobox.grid(row=0, column=1, padx=2, pady=2, sticky=tk.W)
@@ -273,10 +285,11 @@ class TitanUI:
         
         # 摘要长度选择
         ttk.Label(summary_frame, text="长度:").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
-        self.summary_length_var = tk.StringVar(value="中等")
-        length_combobox = ttk.Combobox(summary_frame, textvariable=self.summary_length_var, state="readonly", width=10)
-        length_combobox["values"] = ["简短", "中等", "详细"]
+        self.summary_length_var = tk.StringVar(value="100")
+        length_combobox = ttk.Combobox(summary_frame, textvariable=self.summary_length_var, state="normal", width=10)
+        length_combobox["values"] = ["50", "100", "200", "300", "500"]
         length_combobox.grid(row=0, column=3, padx=5, pady=5, sticky=tk.W)
+        length_combobox.bind("<FocusOut>", self.validate_length)
         
         # 生成摘要按钮
         self.generate_button = ttk.Button(summary_frame, text="生成摘要", command=self.toggle_generation)
@@ -285,6 +298,10 @@ class TitanUI:
         # 批量生成按钮
         self.stop_button = ttk.Button(summary_frame, text="停止", command=self.stop_generation, state=tk.DISABLED)
         self.stop_button.grid(row=0, column=5, padx=5, pady=5, sticky=tk.W)
+
+        # 添加全部章节摘要按钮
+        self.all_chapters_button = ttk.Button(summary_frame, text="生成全部摘要", command=self.summarize_all_chapters)
+        self.all_chapters_button.grid(row=0, column=6, padx=5, pady=5, sticky=tk.W)
 
     def create_text_areas(self):
         """创建文本区域"""
@@ -787,6 +804,9 @@ class TitanUI:
             self.summary_text.delete("1.0", tk.END)
             self.summary_text.insert(tk.END, "正在生成摘要，请稍候...")
             
+            # 开始处理摘要队列
+            self.process_summarize_queue()
+            
             # 在后台线程中生成摘要
             threading.Thread(
                 target=self._generate_summary_thread, 
@@ -802,6 +822,42 @@ class TitanUI:
             logger.error(f"生成摘要出错: {str(e)}", exc_info=True)
             messagebox.showerror("错误", f"生成摘要出错: {str(e)}")
             return False
+
+    def process_summarize_queue(self):
+        """处理摘要队列中的消息"""
+        try:
+            # 检查队列中是否有消息
+            if not hasattr(self, 'summarize_queue') or self.summarize_queue.empty():
+                # 如果队列为空，则100毫秒后再次检查
+                self.root.after(100, self.process_summarize_queue)
+                return
+                
+            # 从队列中获取消息
+            status, message = self.summarize_queue.get_nowait()
+            
+            if status == "success":
+                # 成功生成摘要，更新UI
+                self.summary_text.delete("1.0", tk.END)
+                self.summary_text.insert(tk.END, message)
+                self.update_status("摘要生成完成")
+            elif status == "error":
+                # 生成摘要出错，显示错误信息
+                self.summary_text.delete("1.0", tk.END)
+                self.summary_text.insert(tk.END, f"生成摘要出错: {message}")
+                self.update_status("摘要生成失败")
+            
+            # 重置生成状态
+            self.generating = False
+            self.generate_button.config(text="生成摘要")
+            if hasattr(self, 'stop_button'):
+                self.stop_button.config(state=tk.DISABLED)
+                
+            # 继续处理队列
+            self.root.after(100, self.process_summarize_queue)
+        except Exception as e:
+            logger.error(f"处理摘要队列出错: {str(e)}", exc_info=True)
+            # 出错后也要继续处理队列
+            self.root.after(100, self.process_summarize_queue)
 
     def update_ui_after_model_loaded(self):
         """模型加载后更新UI状态"""
@@ -852,44 +908,34 @@ class TitanUI:
 
     def generate_summary_text(self, original_content, summary_mode, length):
         """生成摘要文本"""
+        if not self.summarizer:
+            raise Exception("摘要器未初始化")
+        
+        # 转换长度参数
         try:
-            # 检查是否已加载模型
-            if not self.summarizer:
-                return "错误：请先加载模型"
-                
-            # 检查模型是否已加载，直接使用model_loaded属性
-            model_is_loaded = False
-            if hasattr(self.summarizer, 'model_loaded'):
-                model_is_loaded = self.summarizer.model_loaded
+            max_length = int(length)
+        except ValueError:
+            # 如果不是数字，使用默认值
+            max_length = 100
+            if length == "简短":
+                max_length = 50
+            elif length == "中等":
+                max_length = 100
+            elif length == "详细":
+                max_length = 200
             
-            if not model_is_loaded:
-                return "错误：模型尚未加载完成"
-                
-            # 根据摘要模式和长度设置提示词
-            length_tokens = {
-                "短": 100,
-                "中": 200,
-                "长": 300,
-                "超长": 500
-            }.get(length, 200)
-            
-            # 根据模式选择不同的摘要方法
-            if summary_mode == "提取式":
-                # 提取式摘要使用简单的句子提取
-                summary = self.summarizer.generate_summary(
-                    original_content, max_length=length_tokens,
-                    summary_mode="extractive"
-                )
-            else:
-                # 生成式摘要使用大模型生成
-                summary = self.summarizer.generate_summary(
-                    original_content, max_length=length_tokens,
-                    summary_mode="generative"
-                )
-            return summary
-        except Exception as e:
-            logger.error(f"生成摘要时出错: {str(e)}", exc_info=True)
-            return f"生成摘要时出错: {str(e)}"
+        # 生成摘要
+        summary = self.summarizer.generate_summary(
+            original_content, 
+            max_length=max_length,
+            summary_mode=summary_mode
+        )
+        
+        # 保存当前章节摘要
+        if hasattr(self, 'current_chapter_index') and self.current_chapter_index is not None:
+            self.save_chapter_summary(self.current_chapter_index, summary)
+        
+        return summary
     
     def batch_summary(self):
         """批量生成多个章节的摘要"""
@@ -1426,15 +1472,20 @@ class TitanUI:
         """运行UI"""
         self.root.mainloop()
 
-    def validate_length(self, event):
+    def validate_length(self, event=None):
         """验证摘要长度"""
         try:
-            max_length = int(self.summary_length_var.get())
+            length_str = self.summary_length_var.get().strip()
+            if not length_str:
+                self.summary_length_var.set(str(self.settings.get("default_length", 100)))
+                return
+                
+            max_length = int(length_str)
             if max_length <= 0:
-                messagebox.showerror("错误", "摘要长度必须是正整数")
+                messagebox.showerror("参数错误", "摘要长度必须是正整数")
                 self.summary_length_var.set(str(self.settings.get("default_length", 100)))
         except ValueError:
-            messagebox.showerror("错误", "摘要长度必须是数字")
+            messagebox.showerror("参数错误", "请输入有效的数字")
             self.summary_length_var.set(str(self.settings.get("default_length", 100)))
 
     def summarize_all_chapters(self):
@@ -1449,12 +1500,17 @@ class TitanUI:
             
         # 获取并验证摘要参数
         try:
-            max_length = int(self.summary_length_var.get())
+            length_str = self.summary_length_var.get().strip()
+            if not length_str:
+                max_length = 100  # 默认长度
+            else:
+                max_length = int(length_str)
+                
             if max_length <= 0:
-                messagebox.showerror("错误", "摘要长度必须是正整数")
+                messagebox.showerror("参数错误", "摘要长度必须是正整数")
                 return
         except ValueError:
-            messagebox.showerror("错误", "摘要长度必须是数字")
+            messagebox.showerror("参数错误", "请输入有效的数字")
             return
             
         # 确认是否继续
@@ -1508,6 +1564,7 @@ class TitanUI:
         # 在后台线程中处理
         def generate_all_summaries():
             try:
+                start_time = time.time()
                 progress_var.set(0)
                 
                 summary_results = []
@@ -1518,21 +1575,33 @@ class TitanUI:
                 summary_mode = "generative"
                 # 如果存在模式选择变量，则使用它
                 if hasattr(self, 'summary_mode_var') and self.summary_mode_var.get():
-                    summary_mode = self.summary_mode_var.get()
+                    mode_text = self.summary_mode_var.get()
+                    summary_mode = "extractive" if mode_text == "提取式" else "generative"
                 
                 for i, chapter in enumerate(self.novel_chapters):
+                    # 计算已用时间
+                    elapsed_time = time.time() - start_time
+                    
                     # 更新进度
-                    progress_var.set(i / len(self.novel_chapters) * 100)
-                    status_var.set(f"生成章节 {i+1}/{len(self.novel_chapters)}: {chapter['title']}")
-                    progress_dialog.update()
+                    update_progress(i, len(self.novel_chapters), chapter['title'], elapsed_time)
                     
                     try:
-                        # 生成摘要
-                        summary = self.summarizer.generate_summary(
-                            chapter['content'], 
-                            max_length=max_length,
-                            summary_mode=summary_mode
-                        )
+                        # 尝试从文件加载已有摘要
+                        existing_summary = self.load_chapter_summary(i)
+                        if existing_summary:
+                            # 如果已有摘要，直接使用
+                            summary = existing_summary
+                            logger.info(f"使用已有摘要: 章节 {i+1}/{len(self.novel_chapters)}: {chapter['title']}")
+                        else:
+                            # 生成新摘要
+                            summary = self.summarizer.generate_summary(
+                                chapter['content'], 
+                                max_length=max_length,
+                                summary_mode=summary_mode
+                            )
+                            
+                            # 保存摘要到文件
+                            self.save_chapter_summary(i, summary)
                         
                         # 记录结果
                         self.novel_chapters[i]['summary'] = summary
@@ -1578,10 +1647,10 @@ class TitanUI:
                     # 如果只有一章，直接显示结果
                     if len(self.novel_chapters) == 1 and self.novel_chapters[0].get('summary'):
                         self.summary_text.delete('1.0', tk.END)
-                        self.summary_text.insert(tk.END, self.novel_chapters[0]['summary'] + "\n")
+                        self.summary_text.insert(tk.END, self.novel_chapters[0]['summary'])
                 
+                # 在UI线程中执行回调
                 self.root.after(0, show_completion)
-                
             except Exception as e:
                 error_message = str(e)
                 
@@ -1749,6 +1818,19 @@ class TitanUI:
             
                 # 更新状态栏
                 self.update_status(f"已选择: {chapter_title}")
+                
+                # 尝试加载已有摘要
+                existing_summary = self.load_chapter_summary(chapter_index)
+                if existing_summary:
+                    self.summary_text.delete('1.0', tk.END)
+                    self.summary_text.insert(tk.END, existing_summary)
+                    
+                    # 更新章节列表状态
+                    self.chapter_list.item(item, values=(
+                        chapter_title,
+                        f"{len(chapter_content)}字",
+                        "已生成"
+                    ))
             else:
                 logger.error(f"未找到章节内容: {chapter_title}")
                 messagebox.showerror("错误", f"未找到章节内容")
@@ -2029,83 +2111,84 @@ class TitanUI:
         self.update_progress_log(0, 100, f"摘要生成失败: {error_msg}")
 
     def _generate_summary_thread(self, original_content, summary_mode, summary_length):
-        """在后台线程中生成摘要的方法"""
+        """在线程中生成摘要"""
         try:
-            # 创建生成摘要进度窗口
-            generate_window = tk.Toplevel(self.root)
-            generate_window.title("生成摘要")
-            generate_window.geometry("400x180")
-            generate_window.transient(self.root)
-            generate_window.resizable(False, False)
+            # 更新状态
+            progress_callback = self.progress_callback_adapter
+            progress_callback(5, "开始生成摘要...")
             
-            # 显示生成信息
-            ttk.Label(generate_window, text="正在生成摘要...", font=("Microsoft YaHei UI", 12)).pack(pady=(20, 10))
+            # 检查是否加载了模型
+            if not self.summarizer:
+                raise Exception("请先加载模型")
+                
+            # 准备参数
+            try:
+                max_length = int(summary_length)
+            except ValueError:
+                # 如果不是数字，使用默认值
+                max_length = 100
+                if summary_length == "简短":
+                    max_length = 50
+                elif summary_length == "中等":
+                    max_length = 100
+                elif summary_length == "详细":
+                    max_length = 200
             
-            # 进度条
-            progress_var = tk.DoubleVar()
-            progress_bar = ttk.Progressbar(generate_window, variable=progress_var, mode="indeterminate", length=300)
-            progress_bar.pack(pady=10, padx=20)
-            progress_bar.start(10)
+            # 更新进度
+            progress_callback(10, f"使用{summary_mode}模式生成摘要...")
             
-            # 状态标签
-            status_var = tk.StringVar(value="处理文本中...")
-            status_label = ttk.Label(generate_window, textvariable=status_var)
-            status_label.pack(pady=5)
+            # 转换摘要模式
+            api_summary_mode = "generative"
+            if summary_mode == "提取式":
+                api_summary_mode = "extractive"
             
-            # 停止按钮
-            stop_btn = ttk.Button(generate_window, text="停止生成", command=self.stop_generation)
-            stop_btn.pack(pady=10)
-            
-            # 更新状态的回调函数
-            def progress_update(progress, message, total=None):
-                if message:
-                    status_var.set(message)
-                if progress and total:
-                    progress_percent = min(100, int((progress / total) * 100))
-                    progress_var.set(progress_percent)
-            
-            # 保存原始回调函数
-            original_callback = self.summarizer.progress_callback
-            
-            # 替换回调函数
+            # 添加进度回调包装器
             def wrapped_callback(progress, message, total=None):
                 # 调用原始回调
-                if original_callback:
-                    original_callback(progress, message, total)
-                # 更新窗口状态
-                self.root.after(0, lambda: progress_update(progress, message, total))
-            
-            self.summarizer.progress_callback = wrapped_callback
-            
+                self.progress_callback_adapter(progress, message, total)
+                
             # 生成摘要
-            summary = self.generate_summary_text(original_content, summary_mode, summary_length)
+            progress_callback(20, "处理中...")
+            summary = self.summarizer.generate_summary(
+                original_content, 
+                max_length=max_length,
+                callback=wrapped_callback,
+                summary_mode=api_summary_mode
+            )
             
-            # 在UI线程中更新摘要区域
-            self.root.after(0, lambda: self.update_summary_display(summary))
+            # 保存摘要
+            if hasattr(self, 'current_chapter_index') and self.current_chapter_index is not None:
+                self.save_chapter_summary(self.current_chapter_index, summary)
+                
+                # 更新章节列表状态
+                selected_items = self.chapter_list.selection()
+                if selected_items:
+                    item_id = selected_items[0]
+                    chapter_title = self.chapter_list.item(item_id, "values")[0]
+                    self.chapter_list.item(item_id, values=(
+                        chapter_title,
+                        f"{len(original_content)}字",
+                        "已生成"
+                    ))
             
-            # 关闭进度窗口
-            generate_window.destroy()
+            # 更新状态
+            progress_callback(100, "摘要生成完成")
+            
+            # 将摘要发送到队列
+            self.summarize_queue.put(("success", summary))
             
         except Exception as e:
-            logger.error(f"生成摘要线程出错: {str(e)}", exc_info=True)
-            self.root.after(0, lambda: self.handle_summary_error(str(e)))
-            if 'generate_window' in locals() and generate_window.winfo_exists():
-                generate_window.destroy()
+            logger.error(f"生成摘要出错: {str(e)}", exc_info=True)
+            self.summarize_queue.put(("error", str(e)))
         finally:
-            # 恢复UI状态
+            # 重置UI状态
             def reset_ui():
                 # 恢复生成按钮状态
-                if hasattr(self, 'generate_button'):
-                    self.generate_button.config(text="生成摘要", state=tk.NORMAL)
-                if hasattr(self, 'stop_button'):
-                    self.stop_button.config(state=tk.DISABLED)
-                # 重置生成状态
                 self.generating = False
-                # 恢复原始回调函数
-                if 'original_callback' in locals():
-                    self.summarizer.progress_callback = original_callback
-            
-            self.root.after(0, reset_ui)
+                self.generate_button.config(text="生成摘要")
+                self.stop_button.config(state=tk.DISABLED)
+                
+            self.root.after(100, reset_ui)
 
     def browse_novels(self):
         """浏览和选择小说文件"""
@@ -2350,6 +2433,74 @@ class TitanUI:
         except Exception as e:
             logger.error(f"保存摘要出错: {str(e)}")
             messagebox.showerror("错误", f"保存摘要出错: {str(e)}")
+
+    def save_chapter_summary(self, chapter_index, summary_text):
+        """保存章节摘要到文件"""
+        try:
+            if not hasattr(self, 'current_novel_path') or not self.current_novel_path:
+                logger.warning("没有当前小说路径，无法保存章节摘要")
+                return False
+                
+            # 创建摘要目录
+            novel_dir = os.path.dirname(self.current_novel_path)
+            novel_filename = os.path.basename(self.current_novel_path)
+            novel_name = os.path.splitext(novel_filename)[0]
+            
+            summary_dir = os.path.join(novel_dir, f"{novel_name}_summaries")
+            os.makedirs(summary_dir, exist_ok=True)
+            
+            # 获取章节信息
+            chapter = self.novel_chapters[chapter_index]
+            chapter_title = chapter['title'].split('\n')[0]  # 只使用第一行作为标题
+            
+            # 清理文件名中的非法字符
+            safe_title = re.sub(r'[\\/*?:"<>|]', '_', chapter_title)
+            
+            # 保存摘要文件
+            summary_file = os.path.join(summary_dir, f"{chapter_index+1:04d}_{safe_title}.txt")
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                f.write(summary_text)
+                
+            logger.info(f"章节摘要已保存: {summary_file}")
+            return True
+        except Exception as e:
+            logger.error(f"保存章节摘要出错: {str(e)}")
+            return False
+        
+    def load_chapter_summary(self, chapter_index):
+        """加载章节摘要"""
+        try:
+            if not hasattr(self, 'current_novel_path') or not self.current_novel_path:
+                return None
+                
+            # 找到摘要目录
+            novel_dir = os.path.dirname(self.current_novel_path)
+            novel_filename = os.path.basename(self.current_novel_path)
+            novel_name = os.path.splitext(novel_filename)[0]
+            
+            summary_dir = os.path.join(novel_dir, f"{novel_name}_summaries")
+            if not os.path.exists(summary_dir):
+                return None
+                
+            # 获取章节信息
+            chapter = self.novel_chapters[chapter_index]
+            chapter_title = chapter['title'].split('\n')[0]
+            
+            # 清理文件名中的非法字符
+            safe_title = re.sub(r'[\\/*?:"<>|]', '_', chapter_title)
+            
+            # 尝试加载摘要文件
+            summary_file = os.path.join(summary_dir, f"{chapter_index+1:04d}_{safe_title}.txt")
+            if os.path.exists(summary_file):
+                with open(summary_file, 'r', encoding='utf-8') as f:
+                    summary = f.read()
+                logger.info(f"已加载章节摘要: {summary_file}")
+                return summary
+            
+            return None
+        except Exception as e:
+            logger.error(f"加载章节摘要出错: {str(e)}")
+            return None
 
 def save_settings_file():
     """创建默认设置文件"""
