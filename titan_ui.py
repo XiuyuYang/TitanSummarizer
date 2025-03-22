@@ -19,6 +19,8 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 import sys
 import io
 import shutil
+import requests
+import subprocess
 
 # 导入自定义模块
 from titan_summarizer import TitanSummarizer
@@ -71,13 +73,16 @@ class TitanUI:
         self.novels_dir = "novels"  # 默认小说目录
         self.main_frame = ttk.Frame(self.root, padding="10")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
-        
+            
         # 加载设置
         self.settings = self.load_settings()
         
         # 应用设置中的默认小说
         if self.settings.get("default_novel"):
             logger.info(f"设置默认小说: {self.settings['default_novel']}")
+        
+        # 扫描本地模型
+        self.local_models = self.scan_local_models()
         
         # 创建UI组件
         self.create_menu()
@@ -97,15 +102,47 @@ class TitanUI:
         self.update_status("就绪")
         logger.info("Titan小说摘要生成器启动完成")
         
-        # 自动加载默认模型
+        # 准备加载默认模型
+        default_model = self.settings.get("default_model", "")
         self.current_local_model_path = self.settings.get("default_local_model")
-        logger.info(f"准备加载默认模型: {self.current_local_model_path}")
+        logger.info(f"默认模型设置: {default_model}, 本地模型路径: {self.current_local_model_path}")
         
-        # 使用设置中的默认模型，强制使用本地模型
-        default_model = "ollama-local"  # 强制使用本地模型
-        
-        logger.info(f"从设置中加载默认模型: {default_model}")
-        self.root.after(1000, lambda: self.load_model(default_model))
+        # 根据默认模型的类型决定如何加载
+        if default_model.endswith(".gguf"):
+            # 如果默认模型是.gguf文件
+            logger.info(f"默认模型是.gguf文件: {default_model}")
+            # 尝试在模型列表中找到这个模型
+            model_found = False
+            if hasattr(self, 'local_model_paths'):
+                for model_name, model_path in self.local_model_paths.items():
+                    if model_name == default_model or os.path.basename(model_path) == default_model:
+                        logger.info(f"在模型列表中找到默认模型: {model_name}")
+                        # 设置选择的模型名称
+                        self.model_var.set(model_name)
+                        # 设置模型路径
+                        self.current_local_model_path = model_path
+                        model_found = True
+                        break
+            
+            if model_found:
+                logger.info(f"从设置中加载本地模型: {self.current_local_model_path}")
+                self.root.after(1000, lambda: self.load_model("ollama-local"))
+            else:
+                logger.warning(f"默认模型 {default_model} 未在列表中找到，不自动加载")
+        elif default_model == "deepseek-api":
+            # 如果是DeepSeek API
+            logger.info("默认使用DeepSeek API模型")
+            self.model_var.set("DeepSeek API")
+            self.root.after(1000, lambda: self.load_model("deepseek-api"))
+        elif default_model == "ollama-local" or not default_model:
+            # 如果是ollama-local或无默认模型
+            if self.current_local_model_path:
+                logger.info(f"使用本地模型路径: {self.current_local_model_path}")
+                self.root.after(1000, lambda: self.load_model("ollama-local"))
+            else:
+                logger.warning("无默认本地模型路径，不自动加载模型")
+        else:
+            logger.info(f"未识别的默认模型类型: {default_model}，不自动加载模型")
 
     def load_settings(self):
         """加载设置"""
@@ -181,26 +218,26 @@ class TitanUI:
         menu_bar.add_cascade(label="帮助", menu=help_menu)
         
         self.root.config(menu=menu_bar)
-        
+            
     def create_control_bar(self):
         """创建控制栏"""
         control_frame = ttk.Frame(self.main_frame)
         control_frame.pack(fill=tk.X, padx=10, pady=5)
-        
+
         # 添加小说控制
         novel_frame = ttk.LabelFrame(control_frame, text="小说选择")
         novel_frame.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         
         # 小说下拉框
-        ttk.Label(novel_frame, text="选择小说:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(novel_frame, text="选择小说:").grid(row=0, column=0, padx=2, pady=2, sticky=tk.W)
         self.novel_var = tk.StringVar()
         self.novel_combobox = ttk.Combobox(novel_frame, textvariable=self.novel_var, state="readonly", width=20)
-        self.novel_combobox.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        self.novel_combobox.grid(row=0, column=1, padx=2, pady=2, sticky=tk.W)
         self.novel_combobox.bind("<<ComboboxSelected>>", self.on_novel_select)
         
         # 添加刷新按钮
-        refresh_btn = ttk.Button(novel_frame, text="打开小说目录", command=self.open_novels_dir)
-        refresh_btn.grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+        refresh_btn = ttk.Button(novel_frame, text="打开小说目录", command=self.open_novels_dir, width=12)
+        refresh_btn.grid(row=0, column=2, padx=2, pady=2, sticky=tk.W)
         
         # 章节变量（用于兼容性）
         self.chapter_var = tk.StringVar()
@@ -210,15 +247,18 @@ class TitanUI:
         gen_frame.pack(side=tk.LEFT, padx=5, fill=tk.X)
         
         # 模型选择下拉框
-        ttk.Label(gen_frame, text="模型:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
-        self.model_var = tk.StringVar(value="Ollama 本地模型")
-        self.model_combobox = ttk.Combobox(gen_frame, textvariable=self.model_var, state="readonly", width=20)
-        self.model_combobox["values"] = ["DeepSeek API", "Ollama 本地模型"]
-        self.model_combobox.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(gen_frame, text="模型:").grid(row=0, column=0, padx=2, pady=2, sticky=tk.W)
+        self.model_var = tk.StringVar(value="请选择大模型")
+        self.model_combobox = ttk.Combobox(gen_frame, textvariable=self.model_var, state="readonly", width=25)
         
-        # 加载模型按钮
-        self.load_model_btn = ttk.Button(gen_frame, text="加载模型", command=lambda: self.load_model(None))
-        self.load_model_btn.grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+        # 添加默认选项和本地模型列表
+        model_values = ["请选择大模型"]
+        if hasattr(self, 'local_models') and self.local_models:
+            model_values.extend(sorted(self.local_models.keys()))
+        self.model_combobox["values"] = model_values
+        self.model_combobox.current(0)  # 设置默认选中第一项
+        self.model_combobox.grid(row=0, column=1, padx=2, pady=2, sticky=tk.W)
+        self.model_combobox.bind("<<ComboboxSelected>>", self.on_model_select)
         
         # 摘要控制区域
         summary_frame = ttk.LabelFrame(control_frame, text="摘要控制")
@@ -252,9 +292,13 @@ class TitanUI:
         main_frame = ttk.Frame(self.main_frame)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # 创建PanedWindow，支持面板大小调整
+        paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
+        paned_window.pack(fill=tk.BOTH, expand=True)
+        
         # 创建左侧章节列表框架
-        chapters_frame = ttk.LabelFrame(main_frame, text="章节列表")
-        chapters_frame.pack(side=tk.LEFT, fill=tk.Y, expand=False, padx=5, pady=5, ipadx=5, ipady=5)
+        chapters_frame = ttk.LabelFrame(paned_window, text="章节列表")
+        paned_window.add(chapters_frame, weight=1)
         
         # 创建章节列表
         columns = ("章节", "字数", "状态")
@@ -276,43 +320,32 @@ class TitanUI:
         # 绑定选择事件
         self.chapter_list.bind("<<TreeviewSelect>>", self.on_chapter_list_select)
         
-        # 创建文本内容框架
-        content_frame = ttk.Frame(main_frame)
-        content_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # 创建右侧内容/摘要区域
+        content_frame = ttk.Frame(paned_window)
+        paned_window.add(content_frame, weight=3)
         
-        # 创建原文框架
-        original_frame = ttk.LabelFrame(content_frame, text="原文")
-        original_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # 创建垂直分隔的PanedWindow
+        vertical_paned = ttk.PanedWindow(content_frame, orient=tk.VERTICAL)
+        vertical_paned.pack(fill=tk.BOTH, expand=True)
         
-        # 原文文本区域
-        self.original_text = tk.Text(original_frame, wrap=tk.WORD, width=40, height=20)
-        original_scrollbar = ttk.Scrollbar(original_frame, orient=tk.VERTICAL, command=self.original_text.yview)
-        self.original_text.config(yscrollcommand=original_scrollbar.set)
-        self.original_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        original_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # 创建原文区域
+        original_frame = ttk.LabelFrame(vertical_paned, text="原文")
+        vertical_paned.add(original_frame, weight=1)
         
-        # 创建摘要框架
-        summary_frame = ttk.LabelFrame(content_frame, text="摘要")
-        summary_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.original_text = scrolledtext.ScrolledText(original_frame, wrap=tk.WORD, width=80, height=15)
+        self.original_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # 摘要文本区域
-        self.summary_text = tk.Text(summary_frame, wrap=tk.WORD, width=40, height=20)
-        summary_scrollbar = ttk.Scrollbar(summary_frame, orient=tk.VERTICAL, command=self.summary_text.yview)
-        self.summary_text.config(yscrollcommand=summary_scrollbar.set)
-        self.summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        summary_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # 创建摘要区域
+        summary_frame = ttk.LabelFrame(vertical_paned, text="摘要")
+        vertical_paned.add(summary_frame, weight=1)
         
-        # 创建日志框架
-        log_frame = ttk.LabelFrame(self.main_frame, text="日志")
-        log_frame.pack(fill=tk.X, expand=False, padx=10, pady=5)
+        self.summary_text = scrolledtext.ScrolledText(summary_frame, wrap=tk.WORD, width=80, height=15)
+        self.summary_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # 日志文本区域
-        self.log_text = tk.Text(log_frame, wrap=tk.WORD, height=6)
-        log_scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
-        self.log_text.config(yscrollcommand=log_scrollbar.set)
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
+        # 创建隐藏的日志文本区域用于记录日志
+        self.log_text = tk.Text(self.root)
+        self.log_text.pack_forget()  # 不显示在UI上
+
     def create_status_bar(self):
         """创建状态栏"""
         self.status_var = tk.StringVar(value="就绪")
@@ -364,8 +397,8 @@ class TitanUI:
             else:
                 percent = 0
                 
-            # 截断至2位小数
-            percent = round(percent, 2)
+            # 截断至整数
+            percent = int(percent)
             
             # 更新进度条
             self.progress_bar["value"] = percent
@@ -514,11 +547,24 @@ class TitanUI:
             if "DeepSeek" in model_display or "deepseek" in model_display.lower():
                 model_name = "deepseek-api"
                 logger.info("选择了DeepSeek API模型")
+            elif model_display.endswith(".gguf") or model_display.endswith(".bin") or model_display.endswith(".ggml"):
+                # 直接使用模型文件作为本地模型
+                model_name = "ollama-local"
+                logger.info(f"选择了本地模型文件: {model_display}")
+                if hasattr(self, 'local_model_paths') and model_display in self.local_model_paths:
+                    self.current_local_model_path = self.local_model_paths[model_display]
+                    logger.info(f"使用本地模型路径: {self.current_local_model_path}")
+                    # 确保模型文件存在
+                    if not os.path.exists(self.current_local_model_path):
+                        logger.error(f"模型文件不存在: {self.current_local_model_path}")
+                        messagebox.showerror("错误", f"模型文件不存在: {os.path.basename(self.current_local_model_path)}\n请确保模型文件存在或选择其他模型。")
+                        self.update_status("模型文件不存在")
+                        return
             elif "Ollama" in model_display or "ollama" in model_display.lower():
                 model_name = "ollama-local"
                 logger.info("选择了Ollama本地模型")
                 # 如果选择了Ollama但没有具体模型，需要选择模型
-                if not hasattr(self, 'current_local_model_path'):
+                if not hasattr(self, 'current_local_model_path') or not self.current_local_model_path:
                     logger.info("没有本地模型路径，弹出选择对话框")
                     self.select_local_model()
                     return
@@ -529,8 +575,47 @@ class TitanUI:
         elif model_name in ["ollama-local", "ollama local", "Ollama 本地模型"]:
             model_name = "ollama-local"
             logger.info("从设置中加载Ollama本地模型")
+            # 如果没有指定本地模型路径，需要选择
+            if not hasattr(self, 'current_local_model_path') or not self.current_local_model_path:
+                logger.info("缺少本地模型路径，弹出选择对话框")
+                self.select_local_model()
+                return
+            
+            # 确保模型文件存在
+            if not os.path.exists(self.current_local_model_path):
+                logger.error(f"模型文件不存在: {self.current_local_model_path}")
+                messagebox.showerror("错误", f"模型文件不存在: {os.path.basename(self.current_local_model_path)}\n请确保模型文件存在或选择其他模型。")
+                self.update_status("模型文件不存在")
+                return
         
         logger.info(f"确认加载模型: {model_name}, 本地模型路径: {getattr(self, 'current_local_model_path', 'None')}")
+        
+        # 创建加载进度窗口
+        loading_window = tk.Toplevel(self.root)
+        loading_window.title("加载模型")
+        loading_window.geometry("400x150")
+        loading_window.transient(self.root)
+        loading_window.grab_set()
+        loading_window.resizable(False, False)
+        
+        # 显示模型信息
+        if model_name == "ollama-local" and hasattr(self, 'current_local_model_path'):
+            model_info = os.path.basename(self.current_local_model_path)
+        else:
+            model_info = "DeepSeek API"
+            
+        ttk.Label(loading_window, text=f"正在加载模型: {model_info}", font=("Microsoft YaHei UI", 12)).pack(pady=(20, 10))
+        
+        # 进度条
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(loading_window, variable=progress_var, mode="indeterminate", length=300)
+        progress_bar.pack(pady=10, padx=20)
+        progress_bar.start(10)
+        
+        # 状态标签
+        status_var = tk.StringVar(value="初始化中...")
+        status_label = ttk.Label(loading_window, textvariable=status_var)
+        status_label.pack(pady=10)
         
         # 使用单独的线程初始化API，避免UI卡顿
         def init_api_in_background():
@@ -538,10 +623,11 @@ class TitanUI:
                 # 记录开始时间
                 start_time = time.time()
                 logger.info(f"开始在后台线程中初始化API: {model_name}")
+                status_var.set("正在初始化API...")
                 
                 # 创建Summarizer实例
                 self.summarizer = TitanSummarizer(
-                    model_size=model_name,
+                    model_size=model_name if model_name else "ollama-local",
                     progress_callback=self.progress_callback_adapter
                 )
                 
@@ -549,18 +635,40 @@ class TitanUI:
                 if model_name == "ollama-local" and hasattr(self, 'current_local_model_path'):
                     # 加载选中的本地模型
                     logger.info(f"准备加载本地模型: {self.current_local_model_path}")
+                    status_var.set("正在加载本地模型文件...")
                     try:
+                        # 检查模型文件是否存在
+                        if not os.path.exists(self.current_local_model_path):
+                            logger.error(f"模型文件不存在: {self.current_local_model_path}")
+                            raise FileNotFoundError(f"模型文件不存在: {self.current_local_model_path}")
+                            
+                        # 尝试加载模型
                         success = self.summarizer.load_local_model(self.current_local_model_path)
                         logger.info(f"本地模型加载结果: {success}")
+                        
+                        if not success:
+                            # 检查Ollama服务是否正常运行
+                            try:
+                                response = requests.get("http://localhost:11434/api/tags")
+                                if response.status_code != 200:
+                                    logger.error("Ollama服务未正常响应")
+                                    raise ConnectionError("Ollama服务未正常响应，请确保Ollama已安装并运行")
+                            except Exception as conn_err:
+                                logger.error(f"连接Ollama服务失败: {str(conn_err)}")
+                                raise ConnectionError(f"连接Ollama服务失败: {str(conn_err)}。请确保Ollama已安装并运行。")
+                                
+                            logger.error("模型加载失败，无法继续")
+                            raise RuntimeError(f"无法加载模型: {os.path.basename(self.current_local_model_path)}")
                     except Exception as e:
                         logger.error(f"加载本地模型时出错: {str(e)}", exc_info=True)
                         success = False
                     
                     if not success:
                         def show_error():
+                            loading_window.destroy()
                             messagebox.showerror(
                                 "模型加载失败",
-                                f"无法加载本地模型: {os.path.basename(self.current_local_model_path)}\n请检查Ollama服务是否正常运行，或选择其他模型。"
+                                f"无法加载本地模型: {os.path.basename(self.current_local_model_path)}\n请检查模型文件是否有效、Ollama服务是否正常运行，或选择其他模型。"
                             )
                         self.root.after(0, show_error)
                         self.update_status("模型加载失败")
@@ -570,37 +678,58 @@ class TitanUI:
                 end_time = time.time()
                 elapsed = end_time - start_time
                 logger.info(f"API初始化完成，耗时: {elapsed:.2f}秒")
+                status_var.set(f"模型加载完成! 用时 {elapsed:.2f} 秒")
                 
                 # 在UI线程中更新状态
                 def update_ui():
-                    if hasattr(self.summarizer, 'is_model_loaded') and self.summarizer.is_model_loaded():
-                        self.update_status(f"模型加载成功 (用时 {elapsed:.2f} 秒)")
-                        self.settings["default_model"] = model_name
+                    loading_window.destroy()  # 关闭加载窗口
+                    
+                    # 检查模型是否已加载
+                    model_is_loaded = False
+                    if hasattr(self, 'summarizer') and self.summarizer is not None:
+                        if hasattr(self.summarizer, 'is_model_loaded'):
+                            model_is_loaded = self.summarizer.is_model_loaded()
+                        elif hasattr(self.summarizer, 'model_loaded'):
+                            model_is_loaded = self.summarizer.model_loaded
+                    
+                    if model_is_loaded:
+                        logger.info("模型加载成功，更新UI")
+                        self.update_status(f"模型加载成功: {model_info}")
+                        
+                        # 更新设置
+                        if model_name == "ollama-local" and hasattr(self, 'current_local_model_path'):
+                            # 更新设置中的默认本地模型
+                            self.settings["default_local_model"] = os.path.basename(self.current_local_model_path)
+                            self.settings["default_local_model_path"] = self.current_local_model_path
+                            logger.info(f"更新默认本地模型设置: {self.settings['default_local_model']}")
+                        elif model_name == "deepseek-api":
+                            self.settings["default_api"] = "deepseek"
+                            logger.info("更新默认API设置: deepseek")
+                        
+                        # 保存设置
                         self.save_settings()
-                        logger.info("模型加载成功，更新UI状态")
                         
                         # 更新UI状态
                         self.update_ui_after_model_loaded()
                     else:
+                        logger.error("模型未成功加载，UI状态未更新")
                         self.update_status("模型加载失败")
-                        logger.error("模型加载失败，summarizer.is_model_loaded() 返回 False 或方法不存在")
-                        messagebox.showerror("错误", "模型加载失败，请检查日志获取详细信息")
+                        messagebox.showwarning("模型加载", "模型状态检查失败，可能无法正常生成摘要。请尝试重新加载或选择其他模型。")
                 
                 self.root.after(0, update_ui)
                 
             except Exception as e:
-                logger.error(f"加载模型时出错: {str(e)}", exc_info=True)
-                
-                # 在UI线程中显示错误
                 def show_error():
-                    messagebox.showerror("错误", f"加载模型时出错: {str(e)}")
+                    loading_window.destroy()
+                    messagebox.showerror("错误", f"模型加载过程中出错: {str(e)}")
+                    logger.error(f"模型加载过程中出错: {str(e)}", exc_info=True)
                     self.update_status("模型加载失败")
                 
                 self.root.after(0, show_error)
         
         # 启动后台线程加载模型
         threading.Thread(target=init_api_in_background, daemon=True).start()
-
+    
     def select_local_model(self):
         """选择本地模型（为保持兼容性）"""
         self.browse_model()
@@ -613,20 +742,20 @@ class TitanUI:
             if self.generate_summary():
                 self.generate_button.config(text="停止生成")
                 self.stop_button.config(state=tk.NORMAL)
-
+    
     def generate_summary(self):
         """生成摘要"""
         try:
             # 检查模型是否已加载
             if not self.summarizer:
                 messagebox.showerror("错误", "请先加载模型")
-                return
-                
+                return False
+            
             # 检查是否正在生成
             if self.generating:
                 messagebox.showinfo("提示", "正在生成中，请稍候")
-                return
-                
+                return False
+            
             # 获取原文
             original_content = self.original_text.get("1.0", tk.END).strip()
             if not original_content:
@@ -640,23 +769,23 @@ class TitanUI:
                         logger.error(f"获取当前章节内容失败: {str(e)}")
                         
             if not original_content:
-                messagebox.showerror("错误", "无内容可进行摘要")
-                return
+                messagebox.showerror("错误", "请先输入或选择要生成摘要的内容")
+                return False
+            
+            # 设置生成状态
+            self.generating = True
+            self.generate_button.config(text="停止生成", state=tk.NORMAL)
+            if hasattr(self, 'stop_button'):
+                self.stop_button.config(state=tk.NORMAL)
                 
             # 获取摘要模式和长度
             summary_mode = self.summary_mode_var.get()
             summary_length = self.summary_length_var.get()
             
-            # 禁用生成按钮
-            self.generate_button.config(state=tk.DISABLED)
-            self.generating = True
-            
-            # 清空摘要区域
-            self.summary_text.delete("1.0", tk.END)
-            
-            # 更新日志和状态
-            self.update_progress_log(0.1, 100, "开始生成摘要...")
+            # 更新状态
             self.update_status("正在生成摘要...")
+            self.summary_text.delete("1.0", tk.END)
+            self.summary_text.insert(tk.END, "正在生成摘要，请稍候...")
             
             # 在后台线程中生成摘要
             threading.Thread(
@@ -677,116 +806,49 @@ class TitanUI:
     def update_ui_after_model_loaded(self):
         """模型加载后更新UI状态"""
         try:
-            # 确保summarizer已初始化
-            if not self.summarizer:
-                logger.error("模型加载失败，summarizer为None")
-                return
-                
-            # 检查模型是否已加载
-            is_loaded = hasattr(self.summarizer, 'is_model_loaded') and self.summarizer.is_model_loaded()
+            # 直接获取summarizer的model_loaded属性，不再调用is_model_loaded方法
+            model_is_loaded = False
             
-            if is_loaded:
-                logger.info("模型加载成功，更新UI状态")
-                
+            if hasattr(self, 'summarizer') and self.summarizer is not None:
+                # 首先尝试直接检查model_loaded属性
+                if hasattr(self.summarizer, 'model_loaded'):
+                    model_is_loaded = self.summarizer.model_loaded
+                    logger.info(f"直接检查model_loaded属性: {model_is_loaded}")
+                # 如果属性不存在，则强制设置为True
+                else:
+                    self.summarizer.model_loaded = True
+                    model_is_loaded = True
+                    logger.info("强制设置model_loaded属性为True")
+            
+            if model_is_loaded:
                 # 更新模型状态标签
                 if hasattr(self, 'model_status_label'):
                     self.model_status_label.config(text="已加载", foreground="green")
-                    
-                # 启用生成摘要按钮
-                if hasattr(self, 'generate_button'):
-                    self.generate_button.config(state=tk.NORMAL)
-                    
-                # 启用导出功能
-                if hasattr(self, 'export_button'):
-                    self.export_button.config(state=tk.NORMAL)
                 
-                # 移除自动生成第一章摘要的功能
-                # self.root.after(1000, self.auto_generate_first_chapter_summary)
-                    
+                # 更新UI状态，检查按钮是否存在
+                # 根据不同版本的UI，按钮名称可能不同
+                if hasattr(self, 'generate_btn'):
+                    self.generate_btn.config(state=tk.NORMAL)
+                elif hasattr(self, 'generate_button'):
+                    self.generate_button.config(state=tk.NORMAL)
+                
+                self.update_status("模型加载完成，可以开始生成摘要")
+                
+                # 如果有章节选择，则激活批量摘要按钮
+                if hasattr(self, 'batch_btn') and hasattr(self, 'chapter_list') and self.chapter_list.get_children():
+                    self.batch_btn.config(state=tk.NORMAL)
+                elif hasattr(self, 'generate_all_btn') and hasattr(self, 'chapter_list') and self.chapter_list.get_children():
+                    self.generate_all_btn.config(state=tk.NORMAL)
             else:
-                logger.error("模型加载失败，summarizer.is_model_loaded() 返回 False 或方法不存在")
+                logger.error("无法确定模型加载状态，model_loaded属性为False或不存在")
                 
                 # 更新模型状态标签
                 if hasattr(self, 'model_status_label'):
                     self.model_status_label.config(text="加载失败", foreground="red")
-                    
         except Exception as e:
-            logger.error(f"更新UI状态出错: {str(e)}")
-            
-    def auto_generate_first_chapter_summary(self):
-        """自动生成第一章摘要"""
-        try:
-            logger.info("开始自动生成第一章摘要")
-            
-            # 确保小说已加载
-            if not hasattr(self, 'novel_chapters') or not self.novel_chapters:
-                logger.warning("找不到小说章节，无法自动生成摘要")
-                return
-                
-            # 查找第一章（跳过前言）
-            first_chapter_index = 0
-            for i, chapter in enumerate(self.novel_chapters):
-                chapter_title = chapter['title'].split('\n')[0]
-                if "第一章" in chapter_title or "第1章" in chapter_title:
-                    first_chapter_index = i
-                    break
-            
-            # 如果找到了第一章，选中它并生成摘要
-            if first_chapter_index >= 0 and first_chapter_index < len(self.novel_chapters):
-                # 获取第一章的内容
-                first_chapter = self.novel_chapters[first_chapter_index]
-                chapter_title = first_chapter['title'].split('\n')[0]
-                logger.info(f"找到第一章: {chapter_title}")
-                
-                # 在章节列表中找到并选中第一章
-                if hasattr(self, 'chapter_list'):
-                    items = self.chapter_list.get_children()
-                    if items and first_chapter_index < len(items):
-                        # 选中第一章
-                        self.chapter_list.selection_set(items[first_chapter_index])
-                        self.chapter_list.focus(items[first_chapter_index])
-                        self.chapter_list.see(items[first_chapter_index])
-                        # 触发章节选择事件
-                        self.on_chapter_list_select(None)
-                        
-                        # 设置当前章节索引
-                        self.current_chapter_index = first_chapter_index
-                        
-                        # 在内容显示区域显示第一章内容
-                        self.original_text.delete("1.0", tk.END)
-                        self.original_text.insert(tk.END, first_chapter['content'])
-                        
-                        # 设置生成状态
-                        self.generating = True
-                        if hasattr(self, 'generate_button'):
-                            self.generate_button.config(text="停止生成", state=tk.NORMAL)
-                        if hasattr(self, 'stop_button'):
-                            self.stop_button.config(state=tk.NORMAL)
-                        
-                        # 生成摘要
-                        self.update_status(f"正在自动生成 '{chapter_title}' 的摘要...")
-                        
-                        # 获取摘要模式和长度
-                        summary_mode = self.summary_mode_var.get()
-                        summary_length = self.summary_length_var.get()
-                        
-                        # 在后台线程中生成摘要
-                        threading.Thread(
-                            target=self._generate_summary_thread, 
-                            args=(first_chapter['content'], summary_mode, summary_length),
-                            daemon=True
-                        ).start()
-                        
-                        logger.info(f"已启动第一章自动摘要生成线程，章节: {chapter_title}")
-                    else:
-                        logger.warning("章节列表为空或者索引无效，无法选择第一章")
-                else:
-                    logger.warning("找不到章节列表控件，无法选择第一章")
-            else:
-                logger.warning("未找到第一章，无法自动生成摘要")
-                
-        except Exception as e:
-            logger.error(f"自动生成第一章摘要出错: {str(e)}", exc_info=True)
+            logger.error(f"更新UI状态时出错: {str(e)}", exc_info=True)
+            if hasattr(self, 'model_status_label'):
+                self.model_status_label.config(text="错误", foreground="red")
 
     def generate_summary_text(self, original_content, summary_mode, length):
         """生成摘要文本"""
@@ -795,55 +857,40 @@ class TitanUI:
             if not self.summarizer:
                 return "错误：请先加载模型"
                 
-            # 检查模型是否已加载
-            is_loaded = hasattr(self.summarizer, 'is_model_loaded') and self.summarizer.is_model_loaded()
-            if not is_loaded:
+            # 检查模型是否已加载，直接使用model_loaded属性
+            model_is_loaded = False
+            if hasattr(self.summarizer, 'model_loaded'):
+                model_is_loaded = self.summarizer.model_loaded
+            
+            if not model_is_loaded:
                 return "错误：模型尚未加载完成"
                 
             # 根据摘要模式和长度设置提示词
             length_tokens = {
-                "简短": 100,
-                "中等": 200,
-                "详细": 400
-            }
+                "短": 100,
+                "中": 200,
+                "长": 300,
+                "超长": 500
+            }.get(length, 200)
             
-            if summary_mode == "生成式":
-                prompt = f"请总结以下内容，生成一个{length}摘要：\n\n{original_content}"
-            else:  # 提取式
-                prompt = f"请从以下内容中提取重要的句子，生成一个{length}摘要：\n\n{original_content}"
-            
-            # 开始生成摘要的线程
-            def generate():
-                try:
-                    # 调用API生成摘要
-                    summary = self.summarizer.generate_summary(
-                        prompt, 
-                        max_length=length_tokens.get(length, 200)
-                    )
-                    
-                    return summary
-                except Exception as e:
-                    logger.error(f"生成摘要出错: {str(e)}")
-                    raise e
-                    
-            # 更新状态
-            self.update_status("正在生成摘要...")
-            self.update_progress_log(0.1, 100, "开始生成")
-            
-            # 生成摘要
-            logger.info("开始生成")
-            summary = generate()
-            
-            # 更新状态
-            self.update_progress_log(1.0, 100, "摘要生成完成")
-            
+            # 根据模式选择不同的摘要方法
+            if summary_mode == "提取式":
+                # 提取式摘要使用简单的句子提取
+                summary = self.summarizer.generate_summary(
+                    original_content, max_length=length_tokens,
+                    summary_mode="extractive"
+                )
+            else:
+                # 生成式摘要使用大模型生成
+                summary = self.summarizer.generate_summary(
+                    original_content, max_length=length_tokens,
+                    summary_mode="generative"
+                )
             return summary
-            
         except Exception as e:
-            logger.error(f"生成摘要出错: {str(e)}")
-            self.update_progress_log(0, 100, f"摘要生成失败: {str(e)}")
+            logger.error(f"生成摘要时出错: {str(e)}", exc_info=True)
             return f"生成摘要时出错: {str(e)}"
-
+    
     def batch_summary(self):
         """批量生成多个章节的摘要"""
         # 获取选中的章节
@@ -1109,8 +1156,8 @@ class TitanUI:
             # 检查章节和小说路径是否有效
             if not selected_chapter or not self.current_novel_path:
                 logger.warning(f"章节选择事件: 未选择章节或小说路径未初始化 (selected_chapter={selected_chapter}, current_novel_path={self.current_novel_path})")
-                return
-                
+            return
+            
             logger.info(f"选择章节: {selected_chapter}")
             self.update_status(f"已选择: {selected_chapter}")
             
@@ -1150,7 +1197,7 @@ class TitanUI:
         except Exception as e:
             logger.error(f"章节选择出错: {str(e)}", exc_info=True)
             messagebox.showerror("错误", f"章节选择出错: {str(e)}")
-
+        
     def clear_summary(self):
         """清空摘要"""
         self.summary_text.delete('1.0', tk.END)
@@ -1202,25 +1249,50 @@ class TitanUI:
         """模型选择事件处理"""
         try:
             # 获取选定的显示名称
-            if hasattr(self, 'model_var'):
-                selected_display = self.model_var.get()
-            else:
-                # 如果没有display变量，直接使用model_var
-                self.model_var = tk.StringVar(value="DeepSeek API")
-                selected_display = self.model_var.get()
+            if not hasattr(self, 'model_var'):
+                self.model_var = tk.StringVar(value="请选择大模型")
+                
+            selected_display = self.model_var.get()
+            logger.info(f"选择模型: {selected_display}")
             
-            # 获取对应的实际模型名称
-            model_name = self.model_var.get()
-            # 更新模型变量
-            self.model_var.set(model_name)
-            
-            # 如果新选择的模型与当前加载的不同，则加载新模型
-            if self.summarizer is None or self.summarizer.model_name != model_name:
-                # 自动加载选定的模型
-                self.load_model(model_name)
+            # 如果选择了默认占位符，直接返回
+            if selected_display == "请选择大模型":
+                return
+                
+            # 如果有本地模型映射，则查找对应的模型路径
+            if hasattr(self, 'local_models') and self.local_models and selected_display in self.local_models:
+                model_path = self.local_models[selected_display]
+                logger.info(f"选择本地模型: {selected_display} -> {model_path}")
+                
+                # 更新当前选择的模型路径（关键修复）
+                self.current_local_model_path = model_path
+                
+                # 更新模型路径
+                self.settings['local_model_path'] = model_path
+                self.settings['default_model'] = selected_display
+                self.settings['default_local_model'] = selected_display
+                self.settings['default_local_model_path'] = model_path
+                
+                # 保存设置
+                self.save_settings()
+                
+                # 更新状态
+                self.update_status(f"已选择本地模型: {selected_display}")
+                
+                # 自动加载选择的模型
+                self.load_model("ollama-local")
+            elif selected_display == "DeepSeek API":
+                # 使用DeepSeek API
+                self.settings['default_model'] = "deepseek-api"
+                self.settings['default_api'] = "deepseek"
+                self.save_settings()
+                self.update_status("已选择DeepSeek API")
+                
+                # 自动加载DeepSeek API
+                self.load_model("deepseek-api")
         except Exception as e:
-            logger.error(f"模型选择时发生错误: {str(e)}")
-            messagebox.showerror("错误", f"模型选择时发生错误: {str(e)}")
+            logger.error(f"模型选择出错: {str(e)}", exc_info=True)
+            messagebox.showerror("错误", f"模型选择出错: {str(e)}")
 
     def get_test_text(self, model_name):
         """获取模型的测试文本"""
@@ -1349,7 +1421,7 @@ class TitanUI:
                 self.stop_button.config(state=tk.DISABLED)
         except Exception as e:
             logger.error(f"停止生成出错: {str(e)}")
-            
+        
     def run(self):
         """运行UI"""
         self.root.mainloop()
@@ -1597,46 +1669,33 @@ class TitanUI:
             
             # 将章节添加到章节列表控件
             for chapter_file in chapters:
-                try:
-                    # 尝试读取文件获取字数
-                    file_path = os.path.join(novel_path, chapter_file)
+                # 尝试读取文件获取字数
+                file_path = os.path.join(novel_path, chapter_file)
+                content = None
+                for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-16', 'big5', 'latin1']:
                     try:
-                        # 尝试不同编码读取文件
-                        content = None
-                        for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-16', 'big5', 'latin1']:
-                            try:
-                                with open(file_path, 'r', encoding=encoding) as f:
-                                    content = f.read()
-                                break
-                            except UnicodeDecodeError:
-                                continue
-                        
-                        # 如果读取成功，添加到列表
-                        if content:
-                            word_count = len(content)
-                            self.chapter_list.insert("", "end", values=(
-                                chapter_file.replace(".txt", "").replace(".md", ""),
-                                f"{word_count}字",
-                                "未生成"
-                            ))
-                        else:
-                            # 文件无法读取，使用默认值
-                            self.chapter_list.insert("", "end", values=(
-                                chapter_file.replace(".txt", "").replace(".md", ""),
-                                "无法读取",
-                                "未生成"
-                            ))
-                    except Exception as e:
-                        logger.error(f"读取章节文件出错: {str(e)}")
-                        # 出错时添加默认值
-                        self.chapter_list.insert("", "end", values=(
-                            chapter_file.replace(".txt", "").replace(".md", ""),
-                            "读取出错",
-                            "未生成"
-                        ))
-                except Exception as e:
-                    logger.error(f"处理章节文件 {chapter_file} 时出错: {str(e)}")
-            
+                        with open(file_path, 'r', encoding=encoding) as f:
+                            content = f.read()
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                
+                # 如果读取成功，添加到列表
+                if content:
+                    word_count = len(content)
+                    self.chapter_list.insert("", "end", values=(
+                        chapter_file.replace(".txt", "").replace(".md", ""),
+                        f"{word_count}字",
+                        "未生成"
+                    ))
+                else:
+                    # 文件无法读取，使用默认值
+                    self.chapter_list.insert("", "end", values=(
+                        chapter_file.replace(".txt", "").replace(".md", ""),
+                        "无法读取",
+                        "未生成"
+                    ))
+
             # 如果有章节，选择第一个
             if chapters:
                 logger.info(f"选择第一个章节: {chapters[0]}")
@@ -1687,7 +1746,7 @@ class TitanUI:
                 # 保存选择的章节
                 self.settings["selected_chapter"] = chapter_title
                 self.save_settings()
-                
+            
                 # 更新状态栏
                 self.update_status(f"已选择: {chapter_title}")
             else:
@@ -1738,7 +1797,7 @@ class TitanUI:
             if not all_chapters:
                 messagebox.showwarning("警告", "没有发现章节，无法导出摘要")
                 return
-                
+            
             # 开始批量生成摘要的线程
             def export_summaries():
                 total_chapters = len(all_chapters)
@@ -1780,50 +1839,19 @@ class TitanUI:
                             self.chapter_list.item(item_id, "values")[1],
                             "已生成"
                         ))
-                            
                     except Exception as e:
                         logger.error(f"导出章节 {chapter_file} 摘要出错: {str(e)}")
-                        
-                # 完成导出
-                self.update_progress(100, "摘要导出完成")
-                messagebox.showinfo("完成", f"所有摘要已导出至: {summary_dir}")
                 
-            # 启动线程执行导出
+                # 完成导出
+                self.update_progress(100, "导出完成")
+                messagebox.showinfo("导出完成", f"已成功导出所有章节摘要到: {summary_dir}")
+            
+            # 启动导出线程
             threading.Thread(target=export_summaries, daemon=True).start()
             
         except Exception as e:
-            logger.error(f"导出所有摘要出错: {str(e)}")
-            messagebox.showerror("错误", f"导出所有摘要出错: {str(e)}")
-
-    def save_summary(self):
-        """保存摘要"""
-        try:
-            # 获取摘要内容
-            summary_content = self.summary_text.get(1.0, tk.END).strip()
-            if not summary_content:
-                messagebox.showwarning("警告", "摘要内容为空，无法保存")
-                return
-                
-            # 打开保存对话框
-            file_path = filedialog.asksaveasfilename(
-                title="保存摘要",
-                defaultextension=".txt",
-                filetypes=[("文本文件", "*.txt"), ("Markdown", "*.md"), ("所有文件", "*.*")]
-            )
-            if not file_path:
-                return  # 用户取消了保存
-                
-            # 保存内容到文件
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(summary_content)
-                
-            # 更新状态
-            file_name = os.path.basename(file_path)
-            self.update_status(f"摘要已保存至: {file_name}")
-            
-        except Exception as e:
-            logger.error(f"保存摘要出错: {str(e)}")
-            messagebox.showerror("错误", f"保存摘要出错: {str(e)}")
+            logger.error(f"导出摘要出错: {str(e)}", exc_info=True)
+            messagebox.showerror("错误", f"导出摘要出错: {str(e)}")
 
     def open_file(self):
         """打开单个文件进行摘要"""
@@ -1847,14 +1875,12 @@ class TitanUI:
                 except UnicodeDecodeError:
                     continue
                 except Exception as e:
-                    logger.error(f"打开文件出错: {str(e)}")
-                    messagebox.showerror("错误", f"打开文件出错: {str(e)}")
-                    return
+                    logger.error(f"使用编码{encoding}打开文件出错: {str(e)}")
             
             if content is None:
                 messagebox.showerror("错误", "无法以支持的编码打开文件")
                 return
-                
+            
             # 显示文件内容到原文区域
             self.original_text.delete(1.0, tk.END)
             self.original_text.insert(tk.END, content)
@@ -1905,49 +1931,30 @@ class TitanUI:
         self.update_status(f"已加载小说: {os.path.basename(novel_dir)}")
 
     def browse_model(self):
-        """浏览并选择本地模型文件"""
-        # 设置为Ollama本地模型
-        self.model_var.set("Ollama 本地模型")
-        
-        # 打开文件选择对话框
-        model_path = filedialog.askopenfilename(
-            title="选择本地模型文件",
-            filetypes=[
-                ("GGUF模型", "*.gguf"),
-                ("量化模型", "*.bin"),
-                ("所有文件", "*.*")
-            ],
-            initialdir=os.path.dirname(self.current_local_model_path) if self.current_local_model_path else None
+        """浏览选择模型文件"""
+        file_path = filedialog.askopenfilename(
+            title="选择模型文件",
+            filetypes=[("GGUF模型", "*.gguf"), ("所有文件", "*.*")],
+            initialdir=self.settings.get('model_dir', 'D:\\Work\\AI_Models')
         )
         
-        if not model_path:
-            logger.info("用户取消了选择本地模型")
-            return
+        if file_path:
+            # 更新模型路径
+            model_name = os.path.basename(file_path)
             
-        logger.info(f"用户选择本地模型: {model_path}")
-        
-        # 保存模型路径
-        self.current_local_model_path = model_path
-        self.api_key_var.set(model_path)
-        
-        # 更新API密钥标签
-        self.api_key_label.config(text="模型路径:")
-        
-        # 隐藏API密钥，显示模型路径
-        self.api_key_entry.config(show="")
-        
-        # 显示浏览按钮
-        self.browse_model_btn.pack(side=tk.RIGHT)
-        
-        # 保存设置
-        self.settings["default_local_model"] = model_path
-        self.save_settings()
-        
-        # 更新状态
-        self.update_status(f"已选择本地模型: {os.path.basename(model_path)}")
-        
-        # 询问是否立即加载模型
-        if messagebox.askyesno("加载模型", "是否立即加载选择的模型?"):
+            # 设置模型下拉框
+            if hasattr(self, 'model_var'):
+                self.model_var.set(model_name)
+                
+            # 保存路径到设置
+            self.settings['local_model_path'] = file_path
+            self.settings['default_model'] = model_name
+            self.save_settings()
+            
+            # 更新状态
+            self.update_status(f"已选择本地模型: {model_name}")
+            
+            # 直接加载模型
             self.load_model("ollama-local")
 
     def scan_novels(self):
@@ -1990,21 +1997,18 @@ class TitanUI:
             if all_novels:
                 self.novel_combobox['values'] = all_novels
                 logger.info(f"更新小说下拉框，共 {len(all_novels)} 个小说")
-            
-            # 如果找到了小说文件或目录
-            if novel_files or novel_dirs:
+                
                 # 如果是用于初始化的扫描，尝试加载默认小说
-                if not self.current_novel_path:
+                if not hasattr(self, 'current_novel_path') or not self.current_novel_path:
                     self.load_default_novel()
                 
                 logger.info(f"扫描完成，找到 {len(novel_files)} 个小说文件和 {len(novel_dirs)} 个小说目录")
                 self.update_status(f"扫描完成，找到 {len(novel_files) + len(novel_dirs)} 个小说")
-                return
-            
-            # 如果没有找到任何小说，显示提示
-            messagebox.showinfo("提示", "未找到小说文件或目录，请将小说文件放在novels目录下")
-            logger.warning("未找到小说文件或目录")
-            self.update_status("未找到小说文件或目录")
+            else:
+                # 如果没有找到任何小说，显示提示
+                messagebox.showinfo("提示", "未找到小说文件或目录，请将小说文件放在novels目录下")
+                logger.warning("未找到小说文件或目录")
+                self.update_status("未找到小说文件或目录")
             
         except Exception as e:
             logger.error(f"扫描小说目录出错: {str(e)}", exc_info=True)
@@ -2027,14 +2031,66 @@ class TitanUI:
     def _generate_summary_thread(self, original_content, summary_mode, summary_length):
         """在后台线程中生成摘要的方法"""
         try:
+            # 创建生成摘要进度窗口
+            generate_window = tk.Toplevel(self.root)
+            generate_window.title("生成摘要")
+            generate_window.geometry("400x180")
+            generate_window.transient(self.root)
+            generate_window.resizable(False, False)
+            
+            # 显示生成信息
+            ttk.Label(generate_window, text="正在生成摘要...", font=("Microsoft YaHei UI", 12)).pack(pady=(20, 10))
+            
+            # 进度条
+            progress_var = tk.DoubleVar()
+            progress_bar = ttk.Progressbar(generate_window, variable=progress_var, mode="indeterminate", length=300)
+            progress_bar.pack(pady=10, padx=20)
+            progress_bar.start(10)
+            
+            # 状态标签
+            status_var = tk.StringVar(value="处理文本中...")
+            status_label = ttk.Label(generate_window, textvariable=status_var)
+            status_label.pack(pady=5)
+            
+            # 停止按钮
+            stop_btn = ttk.Button(generate_window, text="停止生成", command=self.stop_generation)
+            stop_btn.pack(pady=10)
+            
+            # 更新状态的回调函数
+            def progress_update(progress, message, total=None):
+                if message:
+                    status_var.set(message)
+                if progress and total:
+                    progress_percent = min(100, int((progress / total) * 100))
+                    progress_var.set(progress_percent)
+            
+            # 保存原始回调函数
+            original_callback = self.summarizer.progress_callback
+            
+            # 替换回调函数
+            def wrapped_callback(progress, message, total=None):
+                # 调用原始回调
+                if original_callback:
+                    original_callback(progress, message, total)
+                # 更新窗口状态
+                self.root.after(0, lambda: progress_update(progress, message, total))
+            
+            self.summarizer.progress_callback = wrapped_callback
+            
             # 生成摘要
             summary = self.generate_summary_text(original_content, summary_mode, summary_length)
             
             # 在UI线程中更新摘要区域
             self.root.after(0, lambda: self.update_summary_display(summary))
+            
+            # 关闭进度窗口
+            generate_window.destroy()
+            
         except Exception as e:
             logger.error(f"生成摘要线程出错: {str(e)}", exc_info=True)
             self.root.after(0, lambda: self.handle_summary_error(str(e)))
+            if 'generate_window' in locals() and generate_window.winfo_exists():
+                generate_window.destroy()
         finally:
             # 恢复UI状态
             def reset_ui():
@@ -2045,6 +2101,9 @@ class TitanUI:
                     self.stop_button.config(state=tk.DISABLED)
                 # 重置生成状态
                 self.generating = False
+                # 恢复原始回调函数
+                if 'original_callback' in locals():
+                    self.summarizer.progress_callback = original_callback
             
             self.root.after(0, reset_ui)
 
@@ -2232,6 +2291,65 @@ class TitanUI:
             logger.error(f"进度回调适配器错误: {str(e)}")
             # 在出错时，直接用最保守的参数调用更新方法
             self.update_progress_log(0.0, 100, f"更新进度出错: {str(e)}")
+
+    def scan_local_models(self):
+        """扫描本地模型目录，返回所有.gguf文件，不显示扩展名"""
+        try:
+            # 模型根目录
+            model_root = "D:\\Work\\AI_Models"
+            logger.info(f"开始扫描模型目录: {model_root}")
+            
+            # 存储找到的模型文件名到路径的映射
+            self.local_models = {}
+            
+            # 遍历目录和子目录
+            for root, dirs, files in os.walk(model_root):
+                for file in files:
+                    if file.endswith(".gguf"):
+                        full_path = os.path.join(root, file)
+                        # 去除扩展名
+                        model_name = os.path.splitext(file)[0]
+                        logger.info(f"找到模型文件: {model_name} -> {full_path}")
+                        # 记录模型显示名称到完整路径的映射
+                        self.local_models[model_name] = full_path
+            
+            # 按名称排序返回模型名称列表
+            model_names = sorted(self.local_models.keys())
+            logger.info(f"共找到 {len(model_names)} 个本地模型文件")
+            return self.local_models
+        except Exception as e:
+            logger.error(f"扫描本地模型目录时出错: {str(e)}")
+            return {}
+
+    def save_summary(self):
+        """保存摘要"""
+        try:
+            # 获取摘要内容
+            summary_content = self.summary_text.get("1.0", tk.END).strip()
+            if not summary_content:
+                messagebox.showwarning("警告", "摘要内容为空，无法保存")
+                return
+            
+            # 打开保存对话框
+            file_path = filedialog.asksaveasfilename(
+                title="保存摘要",
+                defaultextension=".txt",
+                filetypes=[("文本文件", "*.txt"), ("Markdown", "*.md"), ("所有文件", "*.*")]
+            )
+            if not file_path:
+                return  # 用户取消了保存
+                
+            # 保存内容到文件
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(summary_content)
+                
+            # 更新状态
+            file_name = os.path.basename(file_path)
+            self.update_status(f"摘要已保存至: {file_name}")
+            
+        except Exception as e:
+            logger.error(f"保存摘要出错: {str(e)}")
+            messagebox.showerror("错误", f"保存摘要出错: {str(e)}")
 
 def save_settings_file():
     """创建默认设置文件"""

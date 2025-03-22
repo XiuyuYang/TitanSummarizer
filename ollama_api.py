@@ -170,6 +170,13 @@ class OllamaAPI:
                 logger.error(error_msg)
                 return None
             
+            # 检查文件是否有效的GGUF/GGML模型文件
+            file_ext = os.path.splitext(model_path)[1].lower()
+            if file_ext not in ['.gguf', '.ggml', '.bin']:
+                error_msg = f"不支持的模型文件格式: {file_ext}，需要.gguf、.ggml或.bin格式"
+                logger.error(error_msg)
+                return None
+                
             logger.info(f"准备加载模型，路径: {model_path}")
             model_name = self._generate_model_name(model_path)
             logger.info(f"生成的Ollama模型名称: {model_name}")
@@ -191,13 +198,16 @@ class OllamaAPI:
                 logger.error(f"检查模型时出错: {e}")
                 logger.error("将尝试重新加载模型")
             
-            # 创建Modelfile，告诉Ollama如何加载本地模型
+            # 将Windows路径转换为正斜杠格式，这在Modelfile中是必需的
+            posix_path = model_path.replace('\\', '/')
+            
+            # 创建基本Modelfile
             modelfile_content = f"""
-FROM {model_path}
+FROM {posix_path}
 PARAMETER temperature 0.7
 PARAMETER top_k 40
 PARAMETER top_p 0.9
-PARAMETER num_ctx 2048
+PARAMETER num_ctx 4096
 """
             
             logger.info(f"准备加载本地模型 [{os.path.basename(model_path)}]")
@@ -219,6 +229,7 @@ PARAMETER num_ctx 2048
             logger.info(f"执行命令: {' '.join(cmd)}")
             
             try:
+                # 使用更长的超时时间，确保大型模型有足够时间加载
                 result = subprocess.run(
                     cmd, 
                     shell=False,  # 不使用shell以避免安全风险
@@ -226,7 +237,8 @@ PARAMETER num_ctx 2048
                     stderr=subprocess.PIPE,
                     encoding='utf-8',
                     errors='replace',
-                    text=True
+                    text=True,
+                    timeout=300  # 增加超时时间至5分钟
                 )
                 
                 # 输出加载过程信息
@@ -239,39 +251,61 @@ PARAMETER num_ctx 2048
                 if result.returncode != 0:
                     logger.error(f"加载模型失败，返回码: {result.returncode}")
                     return None
+            except subprocess.TimeoutExpired:
+                logger.error("加载模型超时，可能是模型文件太大或系统资源不足")
+                return None
             except Exception as e:
                 logger.error(f"执行命令出错: {str(e)}", exc_info=True)
                 return None
             
-            # 等待模型加载完成
+            # 等待模型加载完成，对大模型使用更长的等待时间
             logger.info("等待模型加载完成...")
-            time.sleep(3)
+            wait_time = 5  # 基础等待时间（秒）
             
-            # 验证模型是否加载成功
+            # 判断模型大小来决定等待时间
+            file_size_gb = os.path.getsize(model_path) / (1024 * 1024 * 1024)
+            if file_size_gb > 5:  # 大于5GB的模型
+                wait_time = 10
+            elif file_size_gb > 2:  # 大于2GB的模型
+                wait_time = 7
+                
+            logger.info(f"模型大小: {file_size_gb:.2f} GB, 等待 {wait_time} 秒确保加载完成")
+            time.sleep(wait_time)
+            
+            # 设置模型已加载
+            self.current_model = model_name
+            self.model_loaded = True
+            
+            # 验证模型是否可用
+            logger.info(f"验证模型 {model_name} 是否可用...")
             try:
                 # 尝试进行一个简单的测试查询来验证模型
                 headers = {"Content-Type": "application/json"}
                 data = {"model": model_name, "prompt": "Hello", "stream": False}
                 
-                logger.info(f"验证模型 {model_name} 是否可用...")
                 response = requests.post(
                     f"{OLLAMA_API}/api/generate",
                     headers=headers,
-                    data=json.dumps(data)
+                    data=json.dumps(data),
+                    timeout=15  # 增加验证超时设置
                 )
                 
                 if response.status_code == 200:
                     logger.info(f"模型 {model_name} 成功加载并可用")
-                    self.current_model = model_name
-                    self.model_loaded = True
                     return model_name
                 else:
-                    logger.error(f"模型验证失败: {response.status_code}")
-                    logger.error(response.text)
+                    logger.warning(f"模型验证返回非200状态码: {response.status_code}")
+                    logger.warning(f"响应内容: {response.text}")
+                    # 即使验证失败，我们仍设置模型为已加载状态
+                    return model_name
+            except requests.RequestException as req_err:
+                logger.warning(f"验证请求发送失败: {req_err}")
+                # 即使请求失败，我们仍设置模型为已加载状态
+                return model_name
             except Exception as e:
-                logger.error(f"验证模型时出错: {e}")
-            
-            return None
+                logger.warning(f"验证模型时出错: {e}")
+                # 即使验证出错，我们仍设置模型为已加载状态
+                return model_name
         except Exception as e:
             logger.error(f"加载模型过程中发生异常: {str(e)}", exc_info=True)
             return None
@@ -289,12 +323,90 @@ PARAMETER num_ctx 2048
             str: 生成的摘要
         """
         if not self.model_loaded or not self.current_model:
-            return "错误：未加载模型，无法生成摘要"
+            error_msg = f"模型未加载。model_loaded={self.model_loaded}, current_model={self.current_model}"
+            logger.error(error_msg)
+            return f"错误：模型未正确加载，请重新选择并加载模型。状态: {error_msg}"
             
-        # 构建提示词
-        prompt = f"""请对以下文本生成一个简洁的摘要，捕捉其中的关键信息、主要情节和重要人物。摘要应包含文本的主要内容，同时避免过多细节。控制在{max_length or 200}字以内。
+        # 对不同模型系列使用不同的提示词模板
+        model_series = "default"
+        if self.current_model:
+            model_lower = self.current_model.lower()
+            if "qwen" in model_lower:
+                model_series = "qwen"
+            elif "gemma" in model_lower:
+                model_series = "gemma"
+            elif "llama" in model_lower:
+                model_series = "llama"
+            elif "mistral" in model_lower:
+                model_series = "mistral"
+            elif "phi" in model_lower:
+                model_series = "phi"
+            elif "yi" in model_lower:
+                model_series = "yi"
+            elif "baichuan" in model_lower:
+                model_series = "baichuan"
+                
+        # 对不同模型系列使用不同的提示词模板
+        logger.info(f"为{model_series}系列模型构建提示词")
+        
+        if model_series == "qwen":
+            # 千问系列
+            prompt = f"""<|im_start|>system
+你是一个擅长归纳总结的AI助手。请对以下文本生成一个简洁的摘要，捕捉其中的关键信息和主要情节。
+<|im_end|>
+<|im_start|>user
+请为以下文本生成一个{max_length or 200}字以内的摘要：
 
-文本内容：
+{text}
+<|im_end|>
+<|im_start|>assistant
+"""
+        elif model_series == "gemma":
+            # Gemma系列
+            prompt = f"""<start_of_turn>system
+你是一个擅长归纳总结的AI助手。请对以下文本生成一个简洁的摘要，捕捉其中的关键信息和主要情节。
+<end_of_turn>
+<start_of_turn>user
+请为以下文本生成一个{max_length or 200}字以内的摘要：
+
+{text}
+<end_of_turn>
+<start_of_turn>model
+"""
+        elif model_series == "llama":
+            # Llama系列
+            prompt = f"""<s>[INST] <<SYS>>
+你是一个擅长归纳总结的AI助手。请对以下文本生成一个简洁的摘要，捕捉其中的关键信息和主要情节。
+<</SYS>>
+
+请为以下文本生成一个{max_length or 200}字以内的摘要：
+
+{text} [/INST]
+"""
+        elif model_series == "mistral":
+            # Mistral系列
+            prompt = f"""<s>[INST]
+你是一个擅长归纳总结的AI助手。
+请为以下文本生成一个{max_length or 200}字以内的摘要，捕捉其中的关键信息和主要情节：
+
+{text} [/INST]
+"""
+        elif model_series == "phi":
+            # Phi系列
+            prompt = f"""<|system|>
+你是一个擅长归纳总结的AI助手。请对以下文本生成一个简洁的摘要，捕捉其中的关键信息和主要情节。
+<|user|>
+请为以下文本生成一个{max_length or 200}字以内的摘要：
+
+{text}
+<|assistant|>
+"""
+        else:
+            # 通用提示词
+            prompt = f"""你是一个擅长归纳总结的AI助手。
+
+请为以下文本生成一个{max_length or 200}字以内的摘要，捕捉其中的关键信息和主要情节：
+
 {text}
 
 摘要："""
@@ -310,24 +422,59 @@ PARAMETER num_ctx 2048
         
         try:
             logger.info(f"正在使用模型 {self.current_model} 生成摘要...")
+            
+            # 尝试列出当前加载的模型
+            try:
+                response_tags = requests.get(f"{OLLAMA_API}/api/tags")
+                if response_tags.status_code == 200:
+                    available_models = response_tags.json().get("models", [])
+                    model_names = [model.get("name") for model in available_models]
+                    logger.info(f"可用模型: {model_names}")
+                    
+                    # 检查我们的模型是否在列表中
+                    if self.current_model not in model_names:
+                        logger.warning(f"当前模型 {self.current_model} 不在可用模型列表中")
+                        
+                        # 尝试找到模型的简短名称版本
+                        short_name = self.current_model.split('-')[0]
+                        possible_models = [name for name in model_names if short_name in name]
+                        
+                        if possible_models:
+                            logger.info(f"找到可能匹配的模型: {possible_models}")
+                            self.current_model = possible_models[0]
+                            logger.info(f"切换到可用模型: {self.current_model}")
+                            # 更新数据中的模型名称
+                            data["model"] = self.current_model
+            except Exception as list_err:
+                logger.error(f"获取模型列表时出错: {list_err}")
+            
+            # 记录完整的请求详情
+            logger.info(f"API请求URL: {OLLAMA_API}/api/generate")
+            logger.info(f"请求头: {headers}")
+            logger.info(f"请求数据: {json.dumps(data)}")
+            
             response = requests.post(
                 f"{OLLAMA_API}/api/generate",
                 headers=headers,
                 data=json.dumps(data)
             )
             
+            # 记录响应状态和内容
+            logger.info(f"响应状态码: {response.status_code}")
+            
             if response.status_code == 200:
                 result = response.json()
+                logger.info(f"响应内容: {result}")
                 summary = result.get("response", "")
                 return summary
             else:
                 error_msg = f"摘要生成失败: {response.status_code}"
                 logger.error(error_msg)
-                logger.error(response.text)
+                logger.error(f"响应内容: {response.text}")
                 return error_msg
         except Exception as e:
             error_msg = f"摘要生成过程中出错: {str(e)}"
-            logger.error(error_msg)
+            logger.error(error_msg, exc_info=True)
             return error_msg
             
     def is_model_loaded(self):

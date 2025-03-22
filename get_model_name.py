@@ -59,6 +59,10 @@ def get_model_name(model_identifier: str) -> str:
     Returns:
         模型的全名
     """
+    # 处理空值或None
+    if not model_identifier:
+        return "ollama-local"  # 默认使用本地模型
+        
     # 如果是简写，查找对应的模型
     if model_identifier.lower() in MODELS:
         return MODELS[model_identifier.lower()]
