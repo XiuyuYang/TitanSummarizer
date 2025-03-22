@@ -21,6 +21,7 @@ import io
 import shutil
 import requests
 import subprocess
+import datetime
 
 # 导入自定义模块
 from titan_summarizer import TitanSummarizer
@@ -203,6 +204,7 @@ class TitanUI:
         file_menu.add_separator()
         file_menu.add_command(label="保存摘要", command=self.save_summary)
         file_menu.add_command(label="导出全部摘要", command=self.export_all_summaries)
+        file_menu.add_command(label="导出到单个文件", command=self.export_summaries_to_single_file)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.root.quit)
         menu_bar.add_cascade(label="文件", menu=file_menu)
@@ -282,6 +284,40 @@ class TitanUI:
         mode_combobox = ttk.Combobox(summary_frame, textvariable=self.summary_mode_var, state="readonly", width=10)
         mode_combobox["values"] = ["生成式", "提取式"]
         mode_combobox.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        
+        # 添加提取式摘要的提示信息
+        mode_tip_label = ttk.Label(summary_frame, text="(?)", foreground="blue", cursor="hand2")
+        mode_tip_label.grid(row=0, column=2, padx=0, sticky=tk.W)
+        
+        # 创建提示信息
+        def show_mode_tip(event):
+            tip_window = tk.Toplevel(self.root)
+            tip_window.wm_overrideredirect(True)
+            tip_window.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            tip_window.wm_attributes("-topmost", True)
+            
+            tip_frame = ttk.Frame(tip_window, relief=tk.RAISED, borderwidth=1)
+            tip_frame.pack(fill=tk.BOTH, expand=True)
+            
+            tip_text = """摘要模式说明：
+- 生成式：使用AI大模型生成摘要，质量更高但速度较慢。
+- 提取式：从原文中提取关键句组成摘要，速度快但质量可能较低。
+  提取式不需要AI模型，即使未加载模型也能使用。"""
+            
+            tip_label = ttk.Label(tip_frame, text=tip_text, justify=tk.LEFT, background="#FFFFDD", 
+                                padding=5, wraplength=300)
+            tip_label.pack()
+            
+            def close_tip(event=None):
+                tip_window.destroy()
+                
+            tip_window.bind("<Leave>", close_tip)
+            tip_frame.bind("<Button-1>", close_tip)
+            tip_label.bind("<Button-1>", close_tip)
+            
+            self.root.after(10000, close_tip)  # 10秒后自动关闭
+            
+        mode_tip_label.bind("<Button-1>", show_mode_tip)
         
         # 摘要长度选择
         ttk.Label(summary_frame, text="长度:").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
@@ -448,6 +484,7 @@ class TitanUI:
 - 支持生成式和提取式摘要
 - 支持调整摘要长度
 - 支持批量导出摘要
+- 支持将所有摘要导出到单个文件
 - 支持保存单个摘要
 
 开发者：AI辅助开发
@@ -473,7 +510,8 @@ class TitanUI:
             "   - 点击\"批量生成\"可为所有章节生成摘要\n\n"
             "4. 保存结果：\n"
             "   - 点击\"文件\"->\"保存摘要\"可保存当前摘要\n"
-            "   - 点击\"文件\"->\"导出全部摘要\"可导出所有章节摘要\n"
+            "   - 点击\"文件\"->\"导出全部摘要\"可导出所有章节摘要（每章一个文件）\n"
+            "   - 点击\"文件\"->\"导出到单个文件\"可将所有章节摘要导出到一个txt文件中\n"
         )
         
         # 创建帮助窗口
@@ -763,10 +801,19 @@ class TitanUI:
     def generate_summary(self):
         """生成摘要"""
         try:
-            # 检查模型是否已加载
-            if not self.summarizer:
+            # 获取摘要模式
+            summary_mode = self.summary_mode_var.get()
+            
+            # 检查模型是否已加载（仅生成式模式需要）
+            if summary_mode == "生成式" and not self.summarizer:
                 messagebox.showerror("错误", "请先加载模型")
                 return False
+            
+            # 如果是提取式摘要，但没有加载模型，则创建一个临时的摘要器
+            if summary_mode == "提取式" and not self.summarizer:
+                from titan_summarizer import TitanSummarizer
+                self.summarizer = TitanSummarizer()
+                logger.info("提取式摘要模式：使用临时摘要器")
             
             # 检查是否正在生成
             if self.generating:
@@ -795,32 +842,29 @@ class TitanUI:
             if hasattr(self, 'stop_button'):
                 self.stop_button.config(state=tk.NORMAL)
                 
-            # 获取摘要模式和长度
-            summary_mode = self.summary_mode_var.get()
+            # 获取摘要长度
             summary_length = self.summary_length_var.get()
             
-            # 更新状态
+            # 清空当前摘要
+            self.clear_summary()
             self.update_status("正在生成摘要...")
-            self.summary_text.delete("1.0", tk.END)
-            self.summary_text.insert(tk.END, "正在生成摘要，请稍候...")
             
-            # 开始处理摘要队列
-            self.process_summarize_queue()
-            
-            # 在后台线程中生成摘要
+            # 创建并启动线程
             threading.Thread(
-                target=self._generate_summary_thread, 
+                target=self._generate_summary_thread,
                 args=(original_content, summary_mode, summary_length),
                 daemon=True
             ).start()
             
             return True
-                
+            
         except Exception as e:
+            logger.error(f"生成摘要时出错: {str(e)}")
+            messagebox.showerror("错误", f"生成摘要时出错: {str(e)}")
             self.generating = False
-            self.generate_button.config(state=tk.NORMAL)
-            logger.error(f"生成摘要出错: {str(e)}", exc_info=True)
-            messagebox.showerror("错误", f"生成摘要出错: {str(e)}")
+            self.generate_button.config(text="生成摘要", state=tk.NORMAL)
+            if hasattr(self, 'stop_button'):
+                self.stop_button.config(state=tk.DISABLED)
             return False
 
     def process_summarize_queue(self):
@@ -1845,7 +1889,20 @@ class TitanUI:
             if not hasattr(self, 'current_novel_path') or not self.current_novel_path:
                 messagebox.showwarning("警告", "没有选择小说，无法导出摘要")
                 return
+
+            # 询问用户选择导出模式
+            export_mode = messagebox.askyesno(
+                "选择导出模式", 
+                "是否将所有章节摘要保存到一个文件中？\n\n选择'是'：所有摘要保存到一个txt文件\n选择'否'：每个章节单独保存一个txt文件",
+                icon=messagebox.QUESTION
+            )
+            
+            if export_mode:
+                # 导出到单一文件
+                self.export_summaries_to_single_file()
+                return
                 
+            # 以下是原来的多文件导出逻辑
             # 选择导出目录
             export_dir = filedialog.askdirectory(title="选择导出目录")
             if not export_dir:
@@ -1933,6 +1990,146 @@ class TitanUI:
             
         except Exception as e:
             logger.error(f"导出摘要出错: {str(e)}", exc_info=True)
+            messagebox.showerror("错误", f"导出摘要出错: {str(e)}")
+
+    def export_summaries_to_single_file(self):
+        """将所有章节摘要导出到单个文件中"""
+        try:
+            if not hasattr(self, 'current_novel_path') or not self.current_novel_path:
+                messagebox.showwarning("警告", "没有选择小说，无法导出摘要")
+                return
+                
+            # 获取小说名称
+            if os.path.isdir(self.current_novel_path):
+                novel_dir = self.current_novel_path
+                novel_name = os.path.basename(novel_dir)
+            else:
+                novel_dir = os.path.dirname(self.current_novel_path)
+                novel_name = os.path.splitext(os.path.basename(self.current_novel_path))[0]
+            
+            # 选择保存文件路径
+            default_filename = f"{novel_name}_全部摘要.txt"
+            save_path = filedialog.asksaveasfilename(
+                title="保存摘要文件",
+                initialdir=novel_dir,
+                initialfile=default_filename,
+                defaultextension=".txt",
+                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
+            )
+            
+            if not save_path:
+                return  # 用户取消了保存
+            
+            # 获取章节列表
+            if not hasattr(self, 'novel_chapters') or not self.novel_chapters:
+                messagebox.showwarning("警告", "没有加载小说章节，无法导出摘要")
+                return
+            
+            # 开始导出摘要的线程
+            def export_summaries():
+                try:
+                    with open(save_path, 'w', encoding='utf-8') as f:
+                        # 写入小说标题
+                        f.write(f"《{novel_name}》摘要集\n")
+                        f.write("="*50 + "\n\n")
+                        
+                        total_chapters = len(self.novel_chapters)
+                        success_count = 0
+                        
+                        for i, chapter in enumerate(self.novel_chapters):
+                            try:
+                                # 更新进度
+                                progress = (i / total_chapters) * 100
+                                self.update_progress(progress, f"生成摘要: {chapter['title']}")
+                                
+                                # 获取摘要
+                                summary = None
+                                
+                                # 尝试加载现有摘要
+                                existing_summary = self.load_chapter_summary(i)
+                                if existing_summary:
+                                    summary = existing_summary
+                                    logger.info(f"使用已有摘要: 章节 {i+1}/{total_chapters}: {chapter['title']}")
+                                else:
+                                    # 使用摘要模式和长度设置
+                                    summary_mode = self.summary_mode_var.get()
+                                    summary_length = self.summary_length_var.get()
+                                    
+                                    # 默认使用提取式模式，不需要加载模型
+                                    api_summary_mode = "extractive" if summary_mode == "提取式" else "generative"
+                                    
+                                    # 检查是否加载了模型（生成式模式必须）
+                                    if api_summary_mode == "generative" and (not hasattr(self, 'summarizer') or not self.summarizer):
+                                        # 如果未加载模型，则使用提取式摘要
+                                        logger.warning(f"未加载模型，对章节 {chapter['title']} 使用提取式摘要")
+                                        api_summary_mode = "extractive"
+                                    
+                                    # 临时创建摘要器（如果需要）
+                                    temp_summarizer = None
+                                    if not hasattr(self, 'summarizer') or not self.summarizer:
+                                        from titan_summarizer import TitanSummarizer
+                                        temp_summarizer = TitanSummarizer()
+                                    
+                                    summarizer = temp_summarizer or self.summarizer
+                                    
+                                    # 生成摘要
+                                    if api_summary_mode == "extractive":
+                                        max_length = int(summary_length) if summary_length.isdigit() else 100
+                                        summary = summarizer._extractive_summarize(chapter['content'], max_length=max_length)
+                                    else:
+                                        # 生成式摘要
+                                        max_length = int(summary_length) if summary_length.isdigit() else 100
+                                        summary = summarizer.generate_summary(
+                                            chapter['content'], 
+                                            max_length=max_length,
+                                            summary_mode="generative"
+                                        )
+                                    
+                                    # 保存摘要到单独文件（以便后续复用）
+                                    self.save_chapter_summary(i, summary)
+                                
+                                if summary:
+                                    # 写入章节标题和摘要
+                                    f.write(f"第{i+1}章：{chapter['title']}\n")
+                                    f.write("-"*50 + "\n")
+                                    f.write(summary + "\n\n")
+                                    success_count += 1
+                                    
+                                    # 更新章节列表状态
+                                    try:
+                                        item_id = self.chapter_list.get_children()[i]
+                                        values = list(self.chapter_list.item(item_id, "values"))
+                                        values[2] = "已生成"
+                                        self.chapter_list.item(item_id, values=values)
+                                    except Exception as e:
+                                        logger.error(f"更新章节列表状态出错: {str(e)}")
+                                
+                            except Exception as e:
+                                logger.error(f"导出章节 '{chapter['title']}' 摘要出错: {str(e)}")
+                                # 记录错误但继续处理下一章
+                                f.write(f"第{i+1}章：{chapter['title']}\n")
+                                f.write("-"*50 + "\n")
+                                f.write(f"[生成摘要出错: {str(e)}]\n\n")
+                                continue
+                        
+                        # 写入统计信息
+                        f.write("\n" + "="*50 + "\n")
+                        f.write(f"摘要生成统计：共{total_chapters}章，成功{success_count}章，失败{total_chapters-success_count}章\n")
+                        f.write(f"生成时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    
+                    # 完成导出
+                    self.update_progress(100, "导出完成")
+                    messagebox.showinfo("导出完成", f"已成功导出所有章节摘要到单个文件：\n{save_path}")
+                
+                except Exception as e:
+                    logger.error(f"导出摘要到单个文件出错: {str(e)}", exc_info=True)
+                    messagebox.showerror("错误", f"导出摘要出错: {str(e)}")
+            
+            # 启动导出线程
+            threading.Thread(target=export_summaries, daemon=True).start()
+        
+        except Exception as e:
+            logger.error(f"导出摘要到单个文件出错: {str(e)}", exc_info=True)
             messagebox.showerror("错误", f"导出摘要出错: {str(e)}")
 
     def open_file(self):
@@ -2138,9 +2335,10 @@ class TitanUI:
             progress_callback(10, f"使用{summary_mode}模式生成摘要...")
             
             # 转换摘要模式
-            api_summary_mode = "generative"
+            api_summary_mode = "generative"  # 默认使用生成式摘要
             if summary_mode == "提取式":
                 api_summary_mode = "extractive"
+                progress_callback(15, "使用提取式摘要算法...")
             
             # 添加进度回调包装器
             def wrapped_callback(progress, message, total=None):
@@ -2149,45 +2347,52 @@ class TitanUI:
                 
             # 生成摘要
             progress_callback(20, "处理中...")
-            summary = self.summarizer.generate_summary(
-                original_content, 
-                max_length=max_length,
-                callback=wrapped_callback,
-                summary_mode=api_summary_mode
-            )
+            
+            # 根据模式生成摘要
+            if api_summary_mode == "extractive":
+                # 使用提取式摘要算法直接生成
+                progress_callback(30, "使用提取式算法提取关键句...")
+                summary = self.summarizer._extractive_summarize(original_content, max_length=max_length)
+                progress_callback(90, "提取式摘要生成完成")
+            else:
+                # 使用大模型生成摘要
+                summary = self.summarizer.generate_summary(
+                    original_content, 
+                    max_length=max_length,
+                    callback=wrapped_callback,
+                    summary_mode=api_summary_mode
+                )
             
             # 保存摘要
             if hasattr(self, 'current_chapter_index') and self.current_chapter_index is not None:
                 self.save_chapter_summary(self.current_chapter_index, summary)
                 
                 # 更新章节列表状态
-                selected_items = self.chapter_list.selection()
-                if selected_items:
-                    item_id = selected_items[0]
-                    chapter_title = self.chapter_list.item(item_id, "values")[0]
-                    self.chapter_list.item(item_id, values=(
-                        chapter_title,
-                        f"{len(original_content)}字",
-                        "已生成"
-                    ))
+                try:
+                    item_id = self.chapter_list.get_children()[self.current_chapter_index]
+                    values = list(self.chapter_list.item(item_id, "values"))
+                    values[2] = "已生成"
+                    self.chapter_list.item(item_id, values=values)
+                except Exception as e:
+                    logger.error(f"更新章节列表状态出错: {str(e)}")
             
-            # 更新状态
-            progress_callback(100, "摘要生成完成")
-            
-            # 将摘要发送到队列
+            # 将摘要放入队列
             self.summarize_queue.put(("success", summary))
             
         except Exception as e:
-            logger.error(f"生成摘要出错: {str(e)}", exc_info=True)
+            logger.error(f"生成摘要出错: {str(e)}")
+            # 将错误信息放入队列
             self.summarize_queue.put(("error", str(e)))
         finally:
-            # 重置UI状态
+            # 无论成功还是失败，都要恢复UI状态
             def reset_ui():
                 # 恢复生成按钮状态
                 self.generating = False
-                self.generate_button.config(text="生成摘要")
-                self.stop_button.config(state=tk.DISABLED)
-                
+                self.generate_button.config(text="生成摘要", state=tk.NORMAL)
+                if hasattr(self, 'stop_button'):
+                    self.stop_button.config(state=tk.DISABLED)
+                    
+            # 在主线程中更新UI
             self.root.after(100, reset_ui)
 
     def browse_novels(self):
@@ -2441,13 +2646,31 @@ class TitanUI:
                 logger.warning("没有当前小说路径，无法保存章节摘要")
                 return False
                 
-            # 创建摘要目录
-            novel_dir = os.path.dirname(self.current_novel_path)
-            novel_filename = os.path.basename(self.current_novel_path)
+            # 获取小说所在目录和小说名称
+            if os.path.isdir(self.current_novel_path):
+                # 当current_novel_path是目录时
+                novel_dir = self.current_novel_path
+                # 从novel_chapters获取小说名称
+                if hasattr(self, 'current_novel_filename') and self.current_novel_filename:
+                    novel_filename = self.current_novel_filename
+                else:
+                    # 如果没有current_novel_filename，使用第一个章节的标题作为小说名
+                    novel_filename = "novel"
+            else:
+                # 当current_novel_path是文件时
+                novel_dir = os.path.dirname(self.current_novel_path)
+                novel_filename = os.path.basename(self.current_novel_path)
+            
             novel_name = os.path.splitext(novel_filename)[0]
             
-            summary_dir = os.path.join(novel_dir, f"{novel_name}_summaries")
-            os.makedirs(summary_dir, exist_ok=True)
+            # 输出诊断信息
+            logger.info(f"保存摘要 - 小说路径: {self.current_novel_path}")
+            logger.info(f"保存摘要 - 小说目录: {novel_dir}")
+            logger.info(f"保存摘要 - 小说文件名: {novel_filename}")
+            logger.info(f"保存摘要 - 小说名称: {novel_name}")
+            
+            # 摘要直接保存在小说同目录，不再创建子目录
+            summary_dir = novel_dir
             
             # 获取章节信息
             chapter = self.novel_chapters[chapter_index]
@@ -2456,15 +2679,17 @@ class TitanUI:
             # 清理文件名中的非法字符
             safe_title = re.sub(r'[\\/*?:"<>|]', '_', chapter_title)
             
-            # 保存摘要文件
-            summary_file = os.path.join(summary_dir, f"{chapter_index+1:04d}_{safe_title}.txt")
+            # 保存摘要文件，使用"小说名_摘要_章节"的命名方式
+            summary_file = os.path.join(summary_dir, f"{novel_name}_摘要_{chapter_index+1:04d}_{safe_title}.txt")
+            logger.info(f"保存摘要 - 即将写入文件: {summary_file}")
+            
             with open(summary_file, 'w', encoding='utf-8') as f:
                 f.write(summary_text)
                 
             logger.info(f"章节摘要已保存: {summary_file}")
             return True
         except Exception as e:
-            logger.error(f"保存章节摘要出错: {str(e)}")
+            logger.error(f"保存章节摘要出错: {str(e)}", exc_info=True)
             return False
         
     def load_chapter_summary(self, chapter_index):
@@ -2473,33 +2698,53 @@ class TitanUI:
             if not hasattr(self, 'current_novel_path') or not self.current_novel_path:
                 return None
                 
-            # 找到摘要目录
-            novel_dir = os.path.dirname(self.current_novel_path)
-            novel_filename = os.path.basename(self.current_novel_path)
+            # 获取小说所在目录和小说名称
+            if os.path.isdir(self.current_novel_path):
+                # 当current_novel_path是目录时
+                novel_dir = self.current_novel_path
+                # 从novel_chapters获取小说名称
+                if hasattr(self, 'current_novel_filename') and self.current_novel_filename:
+                    novel_filename = self.current_novel_filename
+                else:
+                    # 如果没有current_novel_filename，使用第一个章节的标题作为小说名
+                    novel_filename = "novel"
+            else:
+                # 当current_novel_path是文件时
+                novel_dir = os.path.dirname(self.current_novel_path)
+                novel_filename = os.path.basename(self.current_novel_path)
+            
             novel_name = os.path.splitext(novel_filename)[0]
             
-            summary_dir = os.path.join(novel_dir, f"{novel_name}_summaries")
-            if not os.path.exists(summary_dir):
-                return None
-                
-            # 获取章节信息
+            # 输出诊断信息
+            logger.info(f"加载摘要 - 小说路径: {self.current_novel_path}")
+            logger.info(f"加载摘要 - 小说目录: {novel_dir}")
+            logger.info(f"加载摘要 - 小说文件名: {novel_filename}")
+            logger.info(f"加载摘要 - 小说名称: {novel_name}")
+            
+            # 摘要从小说同目录加载，不再使用子目录
+            summary_dir = novel_dir
+            
+            # 确定章节信息
             chapter = self.novel_chapters[chapter_index]
-            chapter_title = chapter['title'].split('\n')[0]
+            chapter_title = chapter['title'].split('\n')[0]  # 只使用第一行作为标题
             
             # 清理文件名中的非法字符
             safe_title = re.sub(r'[\\/*?:"<>|]', '_', chapter_title)
             
             # 尝试加载摘要文件
-            summary_file = os.path.join(summary_dir, f"{chapter_index+1:04d}_{safe_title}.txt")
+            summary_file = os.path.join(summary_dir, f"{novel_name}_摘要_{chapter_index+1:04d}_{safe_title}.txt")
+            logger.info(f"尝试加载章节摘要: {summary_file}")
+            
             if os.path.exists(summary_file):
                 with open(summary_file, 'r', encoding='utf-8') as f:
-                    summary = f.read()
+                    summary_content = f.read()
                 logger.info(f"已加载章节摘要: {summary_file}")
-                return summary
-            
-            return None
+                return summary_content
+            else:
+                logger.info(f"未找到章节摘要: {summary_file}")
+                return None
         except Exception as e:
-            logger.error(f"加载章节摘要出错: {str(e)}")
+            logger.error(f"加载章节摘要出错: {str(e)}", exc_info=True)
             return None
 
 def save_settings_file():
