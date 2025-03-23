@@ -8,7 +8,7 @@ Titan小说摘要器是一个专为中文小说和长文本设计的AI摘要工�
 
 程序采用MVC架构设计，拥有友好的图形界面，适合各类用户使用。无论您是需要快速了解小说内容、整理学习资料，还是处理大量文本数据，Titan小说摘要器都能满足您的需求。
 
-![Titan小说摘要器界面](https://example.com/screenshot.png)
+![Titan小说摘要器界面](images//UI.png)
 
 ## 主要功能
 
@@ -170,7 +170,7 @@ Titan Novel Summarizer is an AI-powered summarization tool designed specifically
 
 The program uses an MVC architecture with a user-friendly graphical interface suitable for all types of users. Whether you need to quickly understand novel content, organize study materials, or process large amounts of text data, Titan Novel Summarizer can meet your needs.
 
-![Titan Novel Summarizer Interface](https://example.com/screenshot.png)
+![Titan Novel Summarizer Interface](images//UI.png)
 
 ## Key Features
 
