@@ -1,171 +1,203 @@
-# Titan小说摘要器
+# TitanSummarizer - 文本摘要工具
 
-一个强大的小说章节摘要工具，支持生成式和提取式摘要，自动保存和加载摘要数据。
+TitanSummarizer是一个功能强大的文本摘要工具，支持多种摘要模式和模型。
 
-## 功能特点
+## 主要特性
 
-- **多种摘要模式**：
-  - 生成式摘要：使用AI模型生成高质量摘要
-  - 提取式摘要：快速从原文提取关键句子作为摘要，无需模型
-  
-- **多种AI模型支持**：
-  - DeepSeek API支持（在线API）
-  - Ollama本地模型支持
-  - 支持自定义本地GGUF模型
-  
-- **摘要管理**：
-  - 自动保存摘要到JSON文件（以小说名_sum.json命名）
-  - 读取时优先从内存读取，内存中没有则从JSON文件加载
-  - 支持导出摘要到单独文件
-  
-- **小说处理**：
-  - 自动检测和分割章节
-  - 支持单文件小说和目录结构小说
-  - 自动处理不同编码的文本文件
-  
-- **用户友好界面**：
-  - 章节列表显示
-  - 进度指示
-  - 错误处理和日志
-  - 设置保存与加载
+- 支持生成式摘要和提取式摘要
+- 支持多种大语言模型：
+  - DeepSeek API在线模型
+  - Ollama本地GGUF模型
+- 图形用户界面和命令行接口
+- 批量处理功能
+- 自动扫描D:\Work\AI_Models目录下的GGUF模型
+- 默认加载小说《凡人修仙传》，方便测试
 
-## 安装和使用
+## 快速开始
 
-### 系统要求
+### Windows
+
+双击`run.bat`启动图形界面。
+
+### 命令行
+
+```bash
+# 运行图形界面
+python main.py
+
+# 使用命令行接口处理文本
+python main.py --cli --text "要摘要的文本内容" --summary-type extractive
+
+# 使用命令行接口处理文件
+python main.py --cli --file path/to/file.txt --output path/to/output.md
+
+# 使用命令行接口处理目录
+python main.py --cli --dir path/to/directory --output path/to/output_dir
+
+# 指定使用的模型
+python main.py --cli --file path/to/file.txt --model deepseek-api --api-key your_api_key
+
+# 指定本地GGUF模型文件路径
+python main.py --cli --file path/to/file.txt --model ollama-local --model-path D:/Work/AI_Models/your_model.gguf
+```
+
+## 自定义设置
+
+- 默认摘要长度：200字符
+- 默认模型：DeepSeek API
+- 模型文件目录：自动扫描`D:\Work\AI_Models`目录下的所有GGUF模型
+
+## 运行测试
+
+运行`run_tests.bat`或使用以下命令执行测试：
+
+```bash
+python main.py --mode test
+```
+
+## 功能特性
+
+- **多种摘要模式**：支持生成式（AI生成）和提取式（关键句提取）摘要
+- **多种模型支持**：
+  - DeepSeek API（在线模型，需要API密钥）
+  - Ollama本地模型（离线运行，支持多种开源模型）
+- **多种输入格式**：支持处理单个文件、整个目录或直接输入文本
+- **批量处理**：可一次性处理整个目录中的所有文本文件
+- **友好的界面**：提供图形用户界面和命令行界面两种使用方式
+- **进度显示**：实时显示处理进度
+- **自动保存**：摘要结果可以保存为Markdown或文本文件
+
+## 安装指南
+
+### 环境要求
 
 - Python 3.8+
-- tkinter (Python GUI库)
-- 推荐Windows 10/11，也支持Linux和macOS
+- 依赖包：详见requirements.txt
 
 ### 安装步骤
 
-1. 克隆或下载本仓库
-2. 安装依赖：
-   ```
-   pip install -r requirements.txt
-   ```
-3. 如果需要使用本地AI模型，请安装Ollama：
-   - 从[Ollama官网](https://ollama.ai/download)下载并安装
+1. 克隆仓库：
 
-### 运行方法
-
-启动程序：
-```
-python titan_ui.py
+```bash
+git clone https://github.com/yourusername/TitanSummarizer.git
+cd TitanSummarizer
 ```
 
-### 使用流程
+2. 创建并激活虚拟环境（可选）：
 
-1. **加载小说**：
-   - 点击"文件"→"打开文件"或"浏览小说"选择小说文件
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# Linux/MacOS
+source .venv/bin/activate
+```
 
-2. **选择摘要模式**：
-   - 生成式摘要：需要加载AI模型
-   - 提取式摘要：无需模型，速度快
+3. 安装依赖：
 
-3. **生成摘要**：
-   - 在左侧章节列表中选择需要摘要的章节
-   - 设置摘要长度
-   - 点击"生成摘要"按钮
+```bash
+pip install -r requirements.txt
+```
 
-4. **导出摘要**：
-   - 摘要会自动保存到`<小说名>_sum.json`文件
-   - 可通过"文件"→"导出摘要到单个文件"导出到其他位置
+## 使用方法
+
+### 图形界面模式
+
+启动图形界面：
+
+```bash
+python -m src
+```
+
+在图形界面中，您可以：
+- 选择要摘要的文件或目录
+- 选择模型类型和摘要模式
+- 设置摘要长度
+- 生成并保存摘要
+
+### 命令行模式
+
+命令行模式适合批处理或集成到其他工作流中：
+
+```bash
+# 摘要单个文件
+python -m src --cli --file path/to/your/file.txt --output path/to/output.md
+
+# 摘要目录中的所有文件
+python -m src --cli --dir path/to/directory --output path/to/output_dir
+
+# 直接摘要文本
+python -m src --cli --text "这是要摘要的长文本..." --output path/to/output.md
+
+# 使用特定模型和模式
+python -m src --cli --file path/to/file.txt --model deepseek-api --mode generative --max-length 300
+```
+
+## 模型配置
+
+### DeepSeek API
+
+使用DeepSeek API需要设置API密钥：
+1. 在图形界面中：选择"模型" > "设置API密钥"
+2. 在命令行中：使用`--api-key`参数
+
+### Ollama本地模型
+
+使用Ollama本地模型需要安装Ollama：
+1. 安装Ollama：[https://ollama.ai/](https://ollama.ai/)
+2. 下载你想要使用的模型，例如：`ollama pull qwen:4b`
+3. 在应用中选择Ollama本地模型，并选择模型路径
 
 ## 项目结构
 
-### 文件结构
+```
+TitanSummarizer/
+├── src/                 # 源代码目录
+│   ├── api/             # API客户端模块
+│   │   ├── deepseek_api.py  # DeepSeek API客户端
+│   │   └── ollama_api.py    # Ollama API客户端
+│   ├── models/          # 摘要模型模块
+│   │   ├── summarizer.py    # 基础摘要器
+│   │   ├── deepseek_summarizer.py
+│   │   ├── ollama_summarizer.py
+│   │   └── factory.py       # 模型工厂
+│   ├── utils/           # 工具函数
+│   │   ├── file_utils.py    # 文件处理工具
+│   │   └── text_utils.py    # 文本处理工具
+│   ├── ui/              # 用户界面
+│   │   ├── main_ui.py       # 主UI
+│   │   └── progress_bar.py  # 进度条组件
+│   ├── __main__.py      # 程序入口
+│   └── titan_summarizer.py  # 主模块
+├── novels/              # 示例小说目录
+├── requirements.txt     # 依赖项列表
+└── README.md            # 项目说明
+```
 
-- `titan_ui.py`：主程序和用户界面
-- `titan_summarizer.py`：摘要生成核心逻辑
-- `ollama_api.py`：Ollama本地模型API接口
-- `deepseek_api.py`：DeepSeek云API接口 
-- `novels/`：存放小说文件的目录
-- `settings.json`：保存用户设置
+## 示例用例
 
-### 模块说明
+- **研究文献摘要**：快速了解学术论文的主要内容
+- **小说章节摘要**：为长篇小说生成章节摘要，便于回顾
+- **新闻摘要**：从新闻文章中提取关键信息
+- **文档摘要**：总结长篇技术文档或报告
 
-#### titan_ui.py
+## 常见问题
 
-主程序和用户界面，包含以下主要功能：
-- `TitanUI`类：主界面类，管理整个应用程序的UI和逻辑
-- 文件操作：打开、加载小说文件
-- 章节处理：检测和显示章节列表
-- 摘要生成：处理摘要请求，调用摘要引擎
-- 摘要管理：保存、加载和导出摘要
-- 设置管理：保存和加载用户设置
+1. **为什么选择生成式摘要？**
+   - 生成式摘要使用AI生成更流畅、自然的摘要内容，质量通常更高
 
-#### titan_summarizer.py
+2. **为什么选择提取式摘要？**
+   - 提取式摘要速度更快，不需要AI模型，适合快速获取关键句子
 
-摘要生成引擎，包含以下主要功能：
-- `TitanSummarizer`类：摘要生成核心类
-- 模型管理：加载和管理AI模型
-- 摘要生成：处理生成式和提取式摘要请求
-- API封装：封装DeepSeek和Ollama API的调用
+3. **遇到"模型加载失败"怎么办？**
+   - 检查您的网络连接
+   - 确认API密钥是否正确
+   - 对于本地模型，确认Ollama服务是否正在运行
 
-#### ollama_api.py
+## 许可协议
 
-Ollama本地模型API封装，提供以下功能：
-- 查找和列出本地模型
-- 加载模型
-- 处理生成请求
-- 管理模型状态
+此项目使用MIT许可证 - 详情请参见[LICENSE](LICENSE)文件。
 
-#### deepseek_api.py
+## 贡献指南
 
-DeepSeek云端API封装，提供以下功能：
-- API认证和调用
-- 错误处理
-- 模拟模式支持
-
-## 技术实现
-
-### 摘要生成
-
-- **提取式摘要**：使用文本排名算法（类似TextRank）提取关键句子
-- **生成式摘要**：使用AI大模型生成摘要，支持DeepSeek-API和Ollama本地模型
-
-### 章节检测
-
-使用正则表达式和启发式算法自动检测小说章节
-
-### 数据存储
-
-- 摘要数据使用JSON格式保存
-- 支持批量导出和单文件导出
-
-## 最近优化
-
-### 2024-03-23代码优化
-1. **移除未使用文件**：删除了`get_model_name.py`，将其功能集成到`titan_summarizer.py`中
-2. **简化导入结构**：优化了导入结构，移除了未使用的模块引用
-3. **精简依赖管理**：更新`requirements.txt`，只保留实际使用的依赖
-4. **文档更新**：
-   - 添加了详细的模块说明
-   - 更新了技术实现描述
-   - 添加了更新日志
-5. **代码可读性**：
-   - 添加了更多的注释和文档字符串
-   - 统一了命名规范和格式
-
-## 许可证
-
-MIT
-
-## 贡献者
-
-- 欢迎提交Pull Request或Issue 
-
-## 更新日志
-
-### v1.0.0 (2023-12-01)
-- 初始版本发布
-
-### v1.1.0 (2024-01-15)
-- 添加提取式摘要功能
-- 优化UI交互
-
-### v1.2.0 (2024-03-22)
-- 改进摘要存储方式为JSON格式
-- 优化代码结构
-- 修复已知bug 
+欢迎贡献代码、报告问题或提出新功能建议。请通过GitHub Issues或Pull Requests参与项目。 
