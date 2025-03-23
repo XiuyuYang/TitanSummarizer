@@ -2,9 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-TitanSummarizer - 大文本摘要系统UI
-简化版UI，专注于中文小说摘要生成
-支持DeepSeek API云端摘要和Ollama本地模型摘要
+Titan小说摘要器 - 主程序
+
+这个模块提供了Titan小说摘要器的主要功能和用户界面。
+它支持以下功能：
+1. 加载和处理小说文件（单文件或目录）
+2. 自动检测和分割章节
+3. 使用生成式或提取式方法创建摘要
+4. 保存摘要到JSON文件
+5. 提供友好的用户界面
+
+作者: AI辅助开发
+日期: 2023
 """
 
 import os
@@ -22,10 +31,19 @@ import shutil
 import requests
 import subprocess
 import datetime
+import traceback
 
 # 导入自定义模块
 from titan_summarizer import TitanSummarizer
-from get_model_name import get_model_display_name, get_model_name
+
+# 模型显示名称函数
+def get_model_display_name(model_name):
+    """根据模型名称返回用于显示的友好名称"""
+    display_names = {
+        "deepseek-api": "DeepSeek在线API",
+        "ollama-local": "Ollama本地模型"
+    }
+    return display_names.get(model_name, model_name)
 
 # 设置日志记录
 logging.basicConfig(
@@ -319,16 +337,16 @@ class TitanUI:
         mode_tip_label.bind("<Button-1>", show_mode_tip)
         
         # 摘要长度选择
-        ttk.Label(summary_frame, text="长度:").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(summary_frame, text="长度:").grid(row=0, column=3, padx=5, pady=5, sticky=tk.W)
         self.summary_length_var = tk.StringVar(value="100")
         length_combobox = ttk.Combobox(summary_frame, textvariable=self.summary_length_var, state="normal", width=10)
         length_combobox["values"] = ["50", "100", "200", "300", "500"]
-        length_combobox.grid(row=0, column=3, padx=5, pady=5, sticky=tk.W)
+        length_combobox.grid(row=0, column=4, padx=5, pady=5, sticky=tk.W)
         length_combobox.bind("<FocusOut>", self.validate_length)
         
         # 生成摘要按钮
         self.generate_button = ttk.Button(summary_frame, text="生成摘要", command=self.toggle_generation)
-        self.generate_button.grid(row=0, column=4, padx=5, pady=5, sticky=tk.W)
+        self.generate_button.grid(row=0, column=5, padx=5, pady=5, sticky=tk.W)
         
         # 添加全部章节摘要按钮
         self.all_chapters_button = ttk.Button(summary_frame, text="生成全部摘要", command=self.summarize_all_chapters)
@@ -484,9 +502,6 @@ class TitanUI:
 特色功能：
 - 摘要实时保存：每生成一个章节摘要，自动保存到"小说名_sum.txt"文件
 - 读取已有摘要：优先从内存读取摘要，内存中没有则从保存文件读取
-
-开发者：AI辅助开发
-联系方式：example@example.com
         
 感谢使用！
 """

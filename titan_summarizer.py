@@ -22,8 +22,27 @@ from deepseek_api import DeepSeekAPI
 # 导入Ollama API
 from ollama_api import OllamaAPI
 
-# 导入辅助函数
-from get_model_name import MODELS, get_model_name
+# 定义可用模型
+MODELS = {
+    "deepseek-api": "deepseek-api",  # DeepSeek API
+    "ollama-local": "ollama-local",  # Ollama本地模型
+}
+
+def get_model_name(model_size):
+    """
+    获取模型名称
+    
+    Args:
+        model_size: 模型大小或类型
+        
+    Returns:
+        模型名称
+    """
+    if model_size in MODELS:
+        return MODELS[model_size]
+    
+    # 默认使用DeepSeek API
+    return "deepseek-api"
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
