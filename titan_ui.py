@@ -203,8 +203,7 @@ class TitanUI:
         file_menu.add_command(label="测试示例", command=self.run_test_example)
         file_menu.add_separator()
         file_menu.add_command(label="保存摘要", command=self.save_summary)
-        file_menu.add_command(label="导出全部摘要", command=self.export_all_summaries)
-        file_menu.add_command(label="导出到单个文件", command=self.export_summaries_to_single_file)
+        file_menu.add_command(label="导出摘要到单个文件", command=self.export_all_summaries)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.root.quit)
         menu_bar.add_cascade(label="文件", menu=file_menu)
@@ -331,10 +330,6 @@ class TitanUI:
         self.generate_button = ttk.Button(summary_frame, text="生成摘要", command=self.toggle_generation)
         self.generate_button.grid(row=0, column=4, padx=5, pady=5, sticky=tk.W)
         
-        # 批量生成按钮
-        self.stop_button = ttk.Button(summary_frame, text="停止", command=self.stop_generation, state=tk.DISABLED)
-        self.stop_button.grid(row=0, column=5, padx=5, pady=5, sticky=tk.W)
-
         # 添加全部章节摘要按钮
         self.all_chapters_button = ttk.Button(summary_frame, text="生成全部摘要", command=self.summarize_all_chapters)
         self.all_chapters_button.grid(row=0, column=6, padx=5, pady=5, sticky=tk.W)
@@ -483,9 +478,12 @@ class TitanUI:
 - 支持多种模型：DeepSeek API、Ollama本地模型、OpenAI API
 - 支持生成式和提取式摘要
 - 支持调整摘要长度
-- 支持批量导出摘要
-- 支持将所有摘要导出到单个文件
-- 支持保存单个摘要
+- 自动保存摘要到单一文件
+- 支持导出摘要到其他位置
+
+特色功能：
+- 摘要实时保存：每生成一个章节摘要，自动保存到"小说名_sum.txt"文件
+- 读取已有摘要：优先从内存读取摘要，内存中没有则从保存文件读取
 
 开发者：AI辅助开发
 联系方式：example@example.com
@@ -496,47 +494,31 @@ class TitanUI:
         
     def show_help(self):
         """显示帮助信息"""
-        help_text = (
-            "使用说明：\n\n"
-            "1. 模型选择与加载：\n"
-            "   - 从菜单栏的\"模型\"中选择DeepSeek API或本地模型\n"
-            "   - 若选择本地模型，将显示可用的GGUF格式模型列表\n\n"
-            "2. 加载小说：\n"
-            "   - 点击\"文件\"->\"打开小说目录\"选择小说所在目录\n"
-            "   - 选择小说后，在章节下拉框中选择要摘要的章节\n\n"
-            "3. 生成摘要：\n"
-            "   - 设置摘要模式（生成式/提取式）和长度\n"
-            "   - 点击\"生成摘要\"按钮开始生成\n"
-            "   - 点击\"批量生成\"可为所有章节生成摘要\n\n"
-            "4. 保存结果：\n"
-            "   - 点击\"文件\"->\"保存摘要\"可保存当前摘要\n"
-            "   - 点击\"文件\"->\"导出全部摘要\"可导出所有章节摘要（每章一个文件）\n"
-            "   - 点击\"文件\"->\"导出到单个文件\"可将所有章节摘要导出到一个txt文件中\n"
-        )
-        
-        # 创建帮助窗口
-        help_window = tk.Toplevel(self.root)
-        help_window.title("使用说明")
-        help_window.geometry("600x500")
-        help_window.minsize(500, 400)
-        help_window.transient(self.root)
-        help_window.grab_set()
-        
-        # 创建文本区域
-        help_text_widget = scrolledtext.ScrolledText(
-            help_window,
-            wrap=tk.WORD,
-            width=70,
-            height=25,
-            font=("SimSun", 10)
-        )
-        help_text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        help_text_widget.insert(tk.END, help_text)
-        help_text_widget.config(state=tk.DISABLED)
-        
-        # 关闭按钮
-        close_btn = ttk.Button(help_window, text="关闭", command=help_window.destroy)
-        close_btn.pack(pady=10)
+        help_text = """Titan小说摘要器使用指南:
+
+1. 首先打开小说文件
+   - 点击"文件"菜单中的"打开文件"或"浏览小说"选择小说文件
+
+2. 加载模型（可选）
+   - 生成式摘要需要加载模型，点击"模型"菜单选择合适的模型
+   - 提取式摘要不需要加载模型
+
+3. 选择章节
+   - 在左侧章节列表中选择需要摘要的章节
+   - 章节内容将显示在右上角文本框
+
+4. 生成摘要
+   - 选择摘要方式："生成式"需要模型支持，质量更高；"提取式"不需要模型，速度更快
+   - 选择摘要长度
+   - 点击"生成摘要"按钮
+
+5. 保存摘要
+   - 摘要会自动保存到以小说名称+"_sum.txt"命名的文件中
+   - 点击"文件"->"导出摘要到单个文件"可将所有摘要导出到其他位置
+
+如需更多帮助，请联系开发者。
+"""
+        messagebox.showinfo("使用指南", help_text)
         
     def run_test_example(self):
         """运行测试示例"""
@@ -1215,7 +1197,7 @@ class TitanUI:
             logger.info(f"成功加载小说，共{len(self.novel_chapters)}章")
             
             # 设置当前小说路径和文件名
-            self.current_novel_path = os.path.dirname(file_path)
+            self.current_novel_path = file_path  # 修改为使用完整的文件路径
             self.current_novel_file = os.path.basename(file_path)
             self.novel_path_var.set(file_path)
             
@@ -1630,22 +1612,47 @@ class TitanUI:
                     update_progress(i, len(self.novel_chapters), chapter['title'], elapsed_time)
                     
                     try:
-                        # 尝试从文件加载已有摘要
-                        existing_summary = self.load_chapter_summary(i)
-                        if existing_summary:
-                            # 如果已有摘要，直接使用
-                            summary = existing_summary
-                            logger.info(f"使用已有摘要: 章节 {i+1}/{len(self.novel_chapters)}: {chapter['title']}")
+                        # 尝试从内存获取摘要
+                        if 'summary' in chapter and chapter['summary']:
+                            summary = chapter['summary']
+                            logger.info(f"使用内存中已有摘要: 章节 {i+1}/{total_chapters}: {chapter['title']}")
                         else:
-                            # 生成新摘要
-                            summary = self.summarizer.generate_summary(
-                                chapter['content'], 
-                                max_length=max_length,
-                                summary_mode=summary_mode
-                            )
+                            # 使用摘要模式和长度设置
+                            summary_mode = self.summary_mode_var.get()
+                            summary_length = self.summary_length_var.get()
                             
-                            # 保存摘要到文件
-                            self.save_chapter_summary(i, summary)
+                            # 默认使用提取式模式，不需要加载模型
+                            api_summary_mode = "extractive" if summary_mode == "提取式" else "generative"
+                            
+                            # 检查是否加载了模型（生成式模式必须）
+                            if api_summary_mode == "generative" and (not hasattr(self, 'summarizer') or not self.summarizer):
+                                # 如果未加载模型，则使用提取式摘要
+                                logger.warning(f"未加载模型，对章节 {chapter['title']} 使用提取式摘要")
+                                api_summary_mode = "extractive"
+                            
+                            # 临时创建摘要器（如果需要）
+                            temp_summarizer = None
+                            if not hasattr(self, 'summarizer') or not self.summarizer:
+                                from titan_summarizer import TitanSummarizer
+                                temp_summarizer = TitanSummarizer()
+                            
+                            summarizer = temp_summarizer or self.summarizer
+                            
+                            # 生成摘要
+                            if api_summary_mode == "extractive":
+                                max_length = int(summary_length) if summary_length.isdigit() else 100
+                                summary = summarizer._extractive_summarize(chapter['content'], max_length=max_length)
+                            else:
+                                # 生成式摘要
+                                max_length = int(summary_length) if summary_length.isdigit() else 100
+                                summary = summarizer.generate_summary(
+                                    chapter['content'], 
+                                    max_length=max_length,
+                                    summary_mode="generative"
+                                )
+                            
+                            # 保存摘要到内存中（以便后续复用）
+                            self.novel_chapters[i]['summary'] = summary
                         
                         # 记录结果
                         self.novel_chapters[i]['summary'] = summary
@@ -1745,88 +1752,312 @@ class TitanUI:
     def load_novel_chapters(self, novel_path):
         """加载小说章节"""
         try:
-            # 检查路径是否存在
-            if not os.path.exists(novel_path):
-                logger.error(f"小说路径不存在: {novel_path}")
-                messagebox.showerror("错误", f"小说路径不存在: {novel_path}")
-                return
+            if not novel_path or not os.path.exists(novel_path):
+                raise Exception(f"找不到小说文件: {novel_path}")
+                
+            # 记录当前小说路径
+            self.current_novel_path = novel_path
             
-            logger.info(f"开始加载小说章节，路径: {novel_path}")
+            # 清空当前章节信息
+            self.novel_chapters = []
+            self.current_chapter_index = None
             
-            # 清空章节变量
-            self.chapter_var.set("")
+            # 更新状态栏
+            self.update_status(f"正在加载小说: {os.path.basename(novel_path)}")
             
+            # 开始处理章节
+            if os.path.isdir(novel_path):
+                # 如果是目录，尝试加载目录中的所有txt文件
+                chapter_files = []
+                for filename in os.listdir(novel_path):
+                    if filename.endswith('.txt') and "_摘要" not in filename and "_sum" not in filename:
+                        full_path = os.path.join(novel_path, filename)
+                        chapter_files.append((filename, full_path))
+                        
+                # 排序章节文件
+                chapter_files.sort(key=lambda x: self._extract_chapter_index(x[0]))
+                
+                # 加载每个章节
+                for i, (filename, file_path) in enumerate(chapter_files):
+                    try:
+                        content = self._read_text_file(file_path)
+                        chapter_title = self._extract_chapter_title(filename, content)
+                        self.novel_chapters.append({
+                            'title': chapter_title,
+                            'content': content,
+                            'filename': filename,
+                            'path': file_path
+                        })
+                    except Exception as e:
+                        logger.error(f"加载章节 {filename} 出错: {str(e)}")
+                        continue
+            else:
+                # 单文件模式，尝试分割成章节
+                content = self._read_text_file(novel_path)
+                
+                # 尝试自动检测章节（基于常见的章节标记）
+                chapters = self._split_into_chapters(content)
+                
+                if not chapters:
+                    # 如果无法检测章节，则将整个文件作为一个章节
+                    filename = os.path.basename(novel_path)
+                    self.novel_chapters.append({
+                        'title': filename,
+                        'content': content,
+                        'filename': filename,
+                        'path': novel_path
+                    })
+                else:
+                    # 添加检测到的章节
+                    for i, (title, chapter_content) in enumerate(chapters):
+                        self.novel_chapters.append({
+                            'title': title,
+                            'content': chapter_content,
+                            'filename': f"{i+1:04d}_{title}.txt",
+                            'path': novel_path
+                        })
+            
+            # 如果有章节，则更新UI
+            if self.novel_chapters:
+                # 更新章节列表
+                self.update_chapter_list()
+                
+                # 更新状态
+                self.update_status(f"已加载小说: {os.path.basename(novel_path)}, 共{len(self.novel_chapters)}章")
+                
+                # 尝试从保存的摘要文件中加载摘要
+                self.load_summaries_from_file()
+                
+                return len(self.novel_chapters)
+            else:
+                self.update_status(f"未能从 {os.path.basename(novel_path)} 中加载章节")
+                return 0
+                
+        except Exception as e:
+            logger.error(f"加载小说出错: {str(e)}", exc_info=True)
+            self.update_status(f"加载小说出错: {str(e)}")
+            raise e
+            
+    def load_summaries_from_file(self):
+        """从汇总JSON文件中加载所有章节摘要"""
+        try:
+            # 获取摘要文件路径
+            summary_file_path = self.get_summary_file_path()
+            if not summary_file_path or not os.path.exists(summary_file_path):
+                logger.info(f"未找到摘要文件: {summary_file_path}")
+                return False
+                
+            logger.info(f"正在从JSON文件加载摘要: {summary_file_path}")
+            self.update_status("正在加载摘要文件...")
+            
+            # 读取JSON文件
+            import json
+            with open(summary_file_path, 'r', encoding='utf-8') as f:
+                summary_data = json.load(f)
+                
+            # 验证JSON数据结构
+            if not isinstance(summary_data, dict) or "chapters" not in summary_data:
+                logger.error("JSON文件格式不正确，缺少chapters字段")
+                return False
+                
+            # 处理每个章节
+            loaded_count = 0
+            chapters = summary_data.get("chapters", [])
+            
+            for chapter_data in chapters:
+                try:
+                    # 获取章节索引和摘要
+                    index = chapter_data.get("index", 0) - 1  # 转换为0-based索引
+                    title = chapter_data.get("title", "")
+                    summary = chapter_data.get("summary", None)
+                    has_summary = chapter_data.get("has_summary", False)
+                    
+                    # 验证索引是否有效
+                    if index < 0 or index >= len(self.novel_chapters) or not summary:
+                        continue
+                        
+                    # 验证标题匹配
+                    if title != self.novel_chapters[index]['title']:
+                        logger.warning(f"章节标题不匹配: {title} vs {self.novel_chapters[index]['title']}")
+                        # 尝试使用标题匹配
+                        found = False
+                        for i, chapter in enumerate(self.novel_chapters):
+                            if chapter['title'] == title:
+                                index = i
+                                found = True
+                                break
+                        if not found:
+                            continue
+                    
+                    # 保存到内存中
+                    self.novel_chapters[index]['summary'] = summary
+                    loaded_count += 1
+                    
+                    # 更新章节列表状态
+                    try:
+                        item_id = self.chapter_list.get_children()[index]
+                        values = list(self.chapter_list.item(item_id, "values"))
+                        values[2] = "已生成"
+                        self.chapter_list.item(item_id, values=values)
+                    except Exception as e:
+                        logger.error(f"更新章节列表状态出错: {str(e)}")
+                        
+                except Exception as e:
+                    logger.error(f"加载章节摘要出错: {str(e)}")
+                    continue
+                    
+            if loaded_count > 0:
+                self.update_status(f"已从JSON文件加载 {loaded_count} 个章节摘要")
+                return True
+            else:
+                logger.info("未能从JSON文件加载任何摘要")
+                return False
+                
+        except Exception as e:
+            logger.error(f"从JSON文件加载摘要出错: {str(e)}", exc_info=True)
+            return False
+            
+    def update_chapter_list(self):
+        """更新章节列表UI"""
+        try:
             # 清空章节列表
             for item in self.chapter_list.get_children():
                 self.chapter_list.delete(item)
             
-            # 获取所有文本文件作为章节
-            chapters = []
-            for file in os.listdir(novel_path):
-                if file.endswith(('.txt', '.md')):
-                    chapters.append(file)
-                    logger.debug(f"找到章节文件: {file}")
-                    
-            # 排序章节（可能根据章节号等进行排序）
-            chapters.sort()
-            logger.info(f"找到 {len(chapters)} 个章节文件")
-            
-            if not chapters:
-                logger.warning(f"在路径 {novel_path} 中没有找到章节文件")
-                self.update_status("未找到章节文件")
-                return
-            
-            # 更新当前小说路径，必须在选择章节前设置
-            self.current_novel_path = novel_path
-            logger.info(f"设置当前小说路径: {self.current_novel_path}")
-            
-            # 将章节添加到章节列表控件
-            for chapter_file in chapters:
-                # 尝试读取文件获取字数
-                file_path = os.path.join(novel_path, chapter_file)
-                content = None
-                for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-16', 'big5', 'latin1']:
-                    try:
-                        with open(file_path, 'r', encoding=encoding) as f:
-                            content = f.read()
-                        break
-                    except UnicodeDecodeError:
-                        continue
+            # 添加章节到列表
+            for i, chapter in enumerate(self.novel_chapters):
+                # 判断是否有摘要
+                summary_status = "已生成" if 'summary' in chapter and chapter['summary'] else "未生成"
                 
-                # 如果读取成功，添加到列表
-                if content:
-                    word_count = len(content)
-                    self.chapter_list.insert("", "end", values=(
-                        chapter_file.replace(".txt", "").replace(".md", ""),
-                        f"{word_count}字",
-                        "未生成"
-                    ))
-                else:
-                    # 文件无法读取，使用默认值
-                    self.chapter_list.insert("", "end", values=(
-                        chapter_file.replace(".txt", "").replace(".md", ""),
-                        "无法读取",
-                        "未生成"
-                    ))
-
+                # 添加到列表
+                self.chapter_list.insert("", "end", values=(
+                    chapter['title'],
+                    f"{len(chapter['content'])}字",
+                    summary_status
+                ))
+            
             # 如果有章节，选择第一个
-            if chapters:
-                logger.info(f"选择第一个章节: {chapters[0]}")
-                self.chapter_var.set(chapters[0])
+            if self.novel_chapters and self.chapter_list.get_children():
+                first_item = self.chapter_list.get_children()[0]
+                self.chapter_list.selection_set(first_item)
+                self.chapter_list.focus(first_item)
                 
-                # 选中列表中的第一项
-                if self.chapter_list.get_children():
-                    first_item = self.chapter_list.get_children()[0]
-                    self.chapter_list.selection_set(first_item)
-                    self.chapter_list.focus(first_item)
-                    self.on_chapter_list_select(None)  # 触发章节列表选择事件
+                # 触发选择事件
+                self.on_chapter_list_select(None)
                 
-            self.update_status(f"已加载 {len(chapters)} 个章节")
-            
         except Exception as e:
-            logger.error(f"加载小说章节出错: {str(e)}", exc_info=True)
-            messagebox.showerror("错误", f"加载小说章节出错: {str(e)}")
+            logger.error(f"更新章节列表UI出错: {str(e)}", exc_info=True)
             
+    def _extract_chapter_title(self, filename, content):
+        """提取章节标题，优先从文件名获取，如果文件名不合适则从内容提取"""
+        # 尝试从文件名中获取标题
+        clean_filename = os.path.splitext(filename)[0]
+        
+        # 移除文件名中的数字和下划线前缀
+        import re
+        match = re.search(r'^[\d_]*(.*?)$', clean_filename)
+        if match and match.group(1):
+            return match.group(1)
+            
+        # 从内容中提取第一行作为标题
+        lines = content.strip().split('\n')
+        if lines:
+            # 查找内容中可能的章节标题
+            for line in lines[:3]:  # 只检查前三行
+                if re.search(r'第[零一二三四五六七八九十百千万\d]+[章节卷集部]', line):
+                    return line.strip()
+            
+            # 如果没有找到章节标记，使用第一行作为标题
+            return lines[0].strip()
+            
+        # 如果都未找到，使用文件名
+        return clean_filename
+        
+    def _extract_chapter_index(self, filename):
+        """从文件名中提取章节索引，用于排序"""
+        # 尝试从文件名中提取数字
+        import re
+        match = re.search(r'^(\d+)', filename)
+        if match:
+            try:
+                return int(match.group(1))
+            except:
+                pass
+                
+        # 尝试提取"第X章"中的X
+        match = re.search(r'第([零一二三四五六七八九十百千万\d]+)[章节卷]', filename)
+        if match:
+            # 尝试将中文数字转换为阿拉伯数字
+            cn_num = match.group(1)
+            try:
+                # 简单处理几种常见情况
+                if cn_num.isdigit():
+                    return int(cn_num)
+                else:
+                    # 中文数字转换（简单处理）
+                    cn_dict = {
+                        '零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10
+                    }
+                    if cn_num in cn_dict:
+                        return cn_dict[cn_num]
+            except:
+                pass
+        
+        # 默认返回文件名的字典序
+        return filename
+        
+    def _read_text_file(self, file_path):
+        """读取文本文件，自动处理编码"""
+        for encoding in ['utf-8', 'gbk', 'gb2312', 'gb18030', 'big5', 'latin-1']:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                logger.debug(f"使用编码 {encoding} 成功读取文件 {file_path}")
+                return content
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                logger.error(f"读取文件 {file_path} 出错: {str(e)}")
+                continue
+                
+        raise Exception(f"无法以任何支持的编码读取文件 {file_path}")
+        
+    def _split_into_chapters(self, content):
+        """将文本内容分割为章节"""
+        import re
+        chapters = []
+        
+        # 常见的章节标记模式
+        patterns = [
+            r"第[零一二三四五六七八九十百千万\d]+[章节卷集].*?[\r\n]",  # 标准章节格式
+            r"Chapter\s+\d+.*?[\r\n]",  # 英文章节格式
+            r"\d+\s*[\.、]\s*.*?[\r\n]"  # 数字加点或顿号
+        ]
+        
+        # 合并所有模式
+        combined_pattern = '|'.join(f'({p})' for p in patterns)
+        matches = list(re.finditer(combined_pattern, content))
+        
+        if not matches:
+            return []
+            
+        # 处理各章节
+        for i in range(len(matches)):
+            start_match = matches[i]
+            chapter_title = start_match.group(0).strip()
+            start = start_match.start()
+            
+            if i < len(matches) - 1:
+                end = matches[i + 1].start()
+            else:
+                end = len(content)
+                
+            chapter_content = content[start:end].strip()
+            chapters.append((chapter_title, chapter_content))
+            
+        return chapters
+
     def on_chapter_list_select(self, event):
         """章节列表选择事件处理"""
         try:
@@ -1890,247 +2121,43 @@ class TitanUI:
                 messagebox.showwarning("警告", "没有选择小说，无法导出摘要")
                 return
 
-            # 询问用户选择导出模式
-            export_mode = messagebox.askyesno(
-                "选择导出模式", 
-                "是否将所有章节摘要保存到一个文件中？\n\n选择'是'：所有摘要保存到一个txt文件\n选择'否'：每个章节单独保存一个txt文件",
-                icon=messagebox.QUESTION
+            # 获取摘要文件路径
+            summary_file_path = self.get_summary_file_path()
+            if not summary_file_path or not os.path.exists(summary_file_path):
+                # 如果文件不存在，则先生成
+                if not self.save_summaries_to_file():
+                    messagebox.showwarning("警告", "无法生成摘要文件")
+                    return
+            
+            # 选择保存位置
+            save_path = filedialog.asksaveasfilename(
+                title="导出摘要文件",
+                initialfile=os.path.basename(summary_file_path),
+                defaultextension=".json",
+                filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")]
             )
             
-            if export_mode:
-                # 导出到单一文件
-                self.export_summaries_to_single_file()
-                return
+            if not save_path:
+                return  # 用户取消了保存
                 
-            # 以下是原来的多文件导出逻辑
-            # 选择导出目录
-            export_dir = filedialog.askdirectory(title="选择导出目录")
-            if not export_dir:
-                return  # 用户取消了选择
-                
-            # 获取小说名称
-            novel_name = os.path.basename(self.current_novel_path)
-            
-            # 创建小说摘要目录
-            summary_dir = os.path.join(export_dir, f"{novel_name}_摘要")
-            if os.path.exists(summary_dir):
-                if not messagebox.askyesno("确认覆盖", f"摘要目录 '{summary_dir}' 已存在，是否覆盖?"):
-                    return  # 用户取消覆盖
-                shutil.rmtree(summary_dir)
-            os.makedirs(summary_dir)
-            
-            # 获取章节列表中的所有章节
-            all_chapters = []
-            for item in self.chapter_list.get_children():
-                chapter_title = self.chapter_list.item(item, "values")[0]
-                # 查找对应的文件名
-                chapter_file = None
-                for file in os.listdir(self.current_novel_path):
-                    if file.endswith(('.txt', '.md')) and (chapter_title in file or chapter_title == file.replace(".txt", "").replace(".md", "")):
-                        chapter_file = file
-                        break
-                
-                if chapter_file:
-                    all_chapters.append((item, chapter_file))
-            
-            if not all_chapters:
-                messagebox.showwarning("警告", "没有发现章节，无法导出摘要")
-                return
-            
-            # 开始批量生成摘要的线程
-            def export_summaries():
-                total_chapters = len(all_chapters)
-                for i, (item_id, chapter_file) in enumerate(all_chapters):
-                    try:
-                        # 更新进度
-                        progress = (i / total_chapters) * 100
-                        self.update_progress(progress, f"导出摘要: {chapter_file}")
-                        
-                        # 读取章节内容
-                        chapter_path = os.path.join(self.current_novel_path, chapter_file)
-                        content = None
-                        # 尝试不同编码读取文件
-                        for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-16', 'big5', 'latin1']:
-                            try:
-                                with open(chapter_path, 'r', encoding=encoding) as f:
-                                    content = f.read()
-                                break
-                            except UnicodeDecodeError:
-                                continue
-                            except Exception as e:
-                                logger.error(f"读取文件时出错: {str(e)}")
-                        
-                        if not content:
-                            logger.error(f"无法读取章节文件: {chapter_path}")
-                            continue
-                            
-                        # 生成摘要
-                        summary = self.generate_summary_text(content, self.summary_mode_var.get(), self.summary_length_var.get())
-                        
-                        # 保存摘要
-                        summary_path = os.path.join(summary_dir, f"{os.path.splitext(chapter_file)[0]}_摘要.txt")
-                        with open(summary_path, 'w', encoding='utf-8') as f:
-                            f.write(summary)
-                            
-                        # 更新章节列表状态
-                        self.chapter_list.item(item_id, values=(
-                            self.chapter_list.item(item_id, "values")[0],
-                            self.chapter_list.item(item_id, "values")[1],
-                            "已生成"
-                        ))
-                    except Exception as e:
-                        logger.error(f"导出章节 {chapter_file} 摘要出错: {str(e)}")
-                
-                # 完成导出
-                self.update_progress(100, "导出完成")
-                messagebox.showinfo("导出完成", f"已成功导出所有章节摘要到: {summary_dir}")
-            
-            # 启动导出线程
-            threading.Thread(target=export_summaries, daemon=True).start()
+            # 复制文件到目标位置
+            try:
+                import shutil
+                shutil.copy2(summary_file_path, save_path)
+                messagebox.showinfo("导出完成", f"摘要已导出到: {save_path}")
+                self.update_status(f"摘要已导出到: {os.path.basename(save_path)}")
+            except Exception as e:
+                logger.error(f"导出摘要文件出错: {str(e)}", exc_info=True)
+                messagebox.showerror("错误", f"导出摘要出错: {str(e)}")
             
         except Exception as e:
             logger.error(f"导出摘要出错: {str(e)}", exc_info=True)
             messagebox.showerror("错误", f"导出摘要出错: {str(e)}")
 
     def export_summaries_to_single_file(self):
-        """将所有章节摘要导出到单个文件中"""
-        try:
-            if not hasattr(self, 'current_novel_path') or not self.current_novel_path:
-                messagebox.showwarning("警告", "没有选择小说，无法导出摘要")
-                return
-                
-            # 获取小说名称
-            if os.path.isdir(self.current_novel_path):
-                novel_dir = self.current_novel_path
-                novel_name = os.path.basename(novel_dir)
-            else:
-                novel_dir = os.path.dirname(self.current_novel_path)
-                novel_name = os.path.splitext(os.path.basename(self.current_novel_path))[0]
-            
-            # 选择保存文件路径
-            default_filename = f"{novel_name}_全部摘要.txt"
-            save_path = filedialog.asksaveasfilename(
-                title="保存摘要文件",
-                initialdir=novel_dir,
-                initialfile=default_filename,
-                defaultextension=".txt",
-                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
-            )
-            
-            if not save_path:
-                return  # 用户取消了保存
-            
-            # 获取章节列表
-            if not hasattr(self, 'novel_chapters') or not self.novel_chapters:
-                messagebox.showwarning("警告", "没有加载小说章节，无法导出摘要")
-                return
-            
-            # 开始导出摘要的线程
-            def export_summaries():
-                try:
-                    with open(save_path, 'w', encoding='utf-8') as f:
-                        # 写入小说标题
-                        f.write(f"《{novel_name}》摘要集\n")
-                        f.write("="*50 + "\n\n")
-                        
-                        total_chapters = len(self.novel_chapters)
-                        success_count = 0
-                        
-                        for i, chapter in enumerate(self.novel_chapters):
-                            try:
-                                # 更新进度
-                                progress = (i / total_chapters) * 100
-                                self.update_progress(progress, f"生成摘要: {chapter['title']}")
-                                
-                                # 获取摘要
-                                summary = None
-                                
-                                # 尝试加载现有摘要
-                                existing_summary = self.load_chapter_summary(i)
-                                if existing_summary:
-                                    summary = existing_summary
-                                    logger.info(f"使用已有摘要: 章节 {i+1}/{total_chapters}: {chapter['title']}")
-                                else:
-                                    # 使用摘要模式和长度设置
-                                    summary_mode = self.summary_mode_var.get()
-                                    summary_length = self.summary_length_var.get()
-                                    
-                                    # 默认使用提取式模式，不需要加载模型
-                                    api_summary_mode = "extractive" if summary_mode == "提取式" else "generative"
-                                    
-                                    # 检查是否加载了模型（生成式模式必须）
-                                    if api_summary_mode == "generative" and (not hasattr(self, 'summarizer') or not self.summarizer):
-                                        # 如果未加载模型，则使用提取式摘要
-                                        logger.warning(f"未加载模型，对章节 {chapter['title']} 使用提取式摘要")
-                                        api_summary_mode = "extractive"
-                                    
-                                    # 临时创建摘要器（如果需要）
-                                    temp_summarizer = None
-                                    if not hasattr(self, 'summarizer') or not self.summarizer:
-                                        from titan_summarizer import TitanSummarizer
-                                        temp_summarizer = TitanSummarizer()
-                                    
-                                    summarizer = temp_summarizer or self.summarizer
-                                    
-                                    # 生成摘要
-                                    if api_summary_mode == "extractive":
-                                        max_length = int(summary_length) if summary_length.isdigit() else 100
-                                        summary = summarizer._extractive_summarize(chapter['content'], max_length=max_length)
-                                    else:
-                                        # 生成式摘要
-                                        max_length = int(summary_length) if summary_length.isdigit() else 100
-                                        summary = summarizer.generate_summary(
-                                            chapter['content'], 
-                                            max_length=max_length,
-                                            summary_mode="generative"
-                                        )
-                                    
-                                    # 保存摘要到单独文件（以便后续复用）
-                                    self.save_chapter_summary(i, summary)
-                                
-                                if summary:
-                                    # 写入章节标题和摘要
-                                    f.write(f"第{i+1}章：{chapter['title']}\n")
-                                    f.write("-"*50 + "\n")
-                                    f.write(summary + "\n\n")
-                                    success_count += 1
-                                    
-                                    # 更新章节列表状态
-                                    try:
-                                        item_id = self.chapter_list.get_children()[i]
-                                        values = list(self.chapter_list.item(item_id, "values"))
-                                        values[2] = "已生成"
-                                        self.chapter_list.item(item_id, values=values)
-                                    except Exception as e:
-                                        logger.error(f"更新章节列表状态出错: {str(e)}")
-                                
-                            except Exception as e:
-                                logger.error(f"导出章节 '{chapter['title']}' 摘要出错: {str(e)}")
-                                # 记录错误但继续处理下一章
-                                f.write(f"第{i+1}章：{chapter['title']}\n")
-                                f.write("-"*50 + "\n")
-                                f.write(f"[生成摘要出错: {str(e)}]\n\n")
-                                continue
-                        
-                        # 写入统计信息
-                        f.write("\n" + "="*50 + "\n")
-                        f.write(f"摘要生成统计：共{total_chapters}章，成功{success_count}章，失败{total_chapters-success_count}章\n")
-                        f.write(f"生成时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                    
-                    # 完成导出
-                    self.update_progress(100, "导出完成")
-                    messagebox.showinfo("导出完成", f"已成功导出所有章节摘要到单个文件：\n{save_path}")
-                
-                except Exception as e:
-                    logger.error(f"导出摘要到单个文件出错: {str(e)}", exc_info=True)
-                    messagebox.showerror("错误", f"导出摘要出错: {str(e)}")
-            
-            # 启动导出线程
-            threading.Thread(target=export_summaries, daemon=True).start()
-        
-        except Exception as e:
-            logger.error(f"导出摘要到单个文件出错: {str(e)}", exc_info=True)
-            messagebox.showerror("错误", f"导出摘要出错: {str(e)}")
+        """将所有章节摘要导出到单个文件中 - 仅保留做为兼容"""
+        # 直接调用新方法
+        self.export_all_summaries()
 
     def open_file(self):
         """打开单个文件进行摘要"""
@@ -2640,112 +2667,218 @@ class TitanUI:
             messagebox.showerror("错误", f"保存摘要出错: {str(e)}")
 
     def save_chapter_summary(self, chapter_index, summary_text):
-        """保存章节摘要到文件"""
+        """保存章节摘要到内存"""
         try:
-            if not hasattr(self, 'current_novel_path') or not self.current_novel_path:
-                logger.warning("没有当前小说路径，无法保存章节摘要")
+            if not hasattr(self, 'novel_chapters') or not self.novel_chapters:
+                logger.warning("未加载小说章节，无法保存摘要")
+                return False
+            
+            if chapter_index < 0 or chapter_index >= len(self.novel_chapters):
+                logger.warning(f"章节索引超出范围: {chapter_index}")
                 return False
                 
-            # 获取小说所在目录和小说名称
-            if os.path.isdir(self.current_novel_path):
-                # 当current_novel_path是目录时
-                novel_dir = self.current_novel_path
-                # 从novel_chapters获取小说名称
-                if hasattr(self, 'current_novel_filename') and self.current_novel_filename:
-                    novel_filename = self.current_novel_filename
-                else:
-                    # 如果没有current_novel_filename，使用第一个章节的标题作为小说名
-                    novel_filename = "novel"
-            else:
-                # 当current_novel_path是文件时
-                novel_dir = os.path.dirname(self.current_novel_path)
-                novel_filename = os.path.basename(self.current_novel_path)
+            # 将摘要保存到novel_chapters中
+            self.novel_chapters[chapter_index]['summary'] = summary_text
             
-            novel_name = os.path.splitext(novel_filename)[0]
-            
-            # 输出诊断信息
-            logger.info(f"保存摘要 - 小说路径: {self.current_novel_path}")
-            logger.info(f"保存摘要 - 小说目录: {novel_dir}")
-            logger.info(f"保存摘要 - 小说文件名: {novel_filename}")
-            logger.info(f"保存摘要 - 小说名称: {novel_name}")
-            
-            # 摘要直接保存在小说同目录，不再创建子目录
-            summary_dir = novel_dir
-            
-            # 获取章节信息
-            chapter = self.novel_chapters[chapter_index]
-            chapter_title = chapter['title'].split('\n')[0]  # 只使用第一行作为标题
-            
-            # 清理文件名中的非法字符
-            safe_title = re.sub(r'[\\/*?:"<>|]', '_', chapter_title)
-            
-            # 保存摘要文件，使用"小说名_摘要_章节"的命名方式
-            summary_file = os.path.join(summary_dir, f"{novel_name}_摘要_{chapter_index+1:04d}_{safe_title}.txt")
-            logger.info(f"保存摘要 - 即将写入文件: {summary_file}")
-            
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                f.write(summary_text)
+            # 更新章节列表状态
+            try:
+                item_id = self.chapter_list.get_children()[chapter_index]
+                values = list(self.chapter_list.item(item_id, "values"))
+                values[2] = "已生成"
+                self.chapter_list.item(item_id, values=values)
+            except Exception as e:
+                logger.error(f"更新章节列表状态出错: {str(e)}")
                 
-            logger.info(f"章节摘要已保存: {summary_file}")
+            logger.info(f"章节摘要已保存到内存: {self.novel_chapters[chapter_index]['title']}")
+            
+            # 自动将所有摘要保存到单一文件中
+            try:
+                # 使用线程避免阻塞UI
+                threading.Thread(target=self.save_summaries_to_file, daemon=True).start()
+                self.update_status(f"章节摘要已保存，正在更新摘要文件...")
+            except Exception as e:
+                logger.error(f"自动保存摘要到文件出错: {str(e)}", exc_info=True)
+            
             return True
+                
         except Exception as e:
             logger.error(f"保存章节摘要出错: {str(e)}", exc_info=True)
             return False
         
     def load_chapter_summary(self, chapter_index):
-        """加载章节摘要"""
+        """从内存或JSON文件加载章节摘要"""
         try:
-            if not hasattr(self, 'current_novel_path') or not self.current_novel_path:
+            if not hasattr(self, 'novel_chapters') or not self.novel_chapters:
+                logger.warning("未加载小说章节，无法读取摘要")
                 return None
                 
-            # 获取小说所在目录和小说名称
-            if os.path.isdir(self.current_novel_path):
-                # 当current_novel_path是目录时
-                novel_dir = self.current_novel_path
-                # 从novel_chapters获取小说名称
-                if hasattr(self, 'current_novel_filename') and self.current_novel_filename:
-                    novel_filename = self.current_novel_filename
-                else:
-                    # 如果没有current_novel_filename，使用第一个章节的标题作为小说名
-                    novel_filename = "novel"
-            else:
-                # 当current_novel_path是文件时
-                novel_dir = os.path.dirname(self.current_novel_path)
-                novel_filename = os.path.basename(self.current_novel_path)
-            
-            novel_name = os.path.splitext(novel_filename)[0]
-            
-            # 输出诊断信息
-            logger.info(f"加载摘要 - 小说路径: {self.current_novel_path}")
-            logger.info(f"加载摘要 - 小说目录: {novel_dir}")
-            logger.info(f"加载摘要 - 小说文件名: {novel_filename}")
-            logger.info(f"加载摘要 - 小说名称: {novel_name}")
-            
-            # 摘要从小说同目录加载，不再使用子目录
-            summary_dir = novel_dir
-            
-            # 确定章节信息
-            chapter = self.novel_chapters[chapter_index]
-            chapter_title = chapter['title'].split('\n')[0]  # 只使用第一行作为标题
-            
-            # 清理文件名中的非法字符
-            safe_title = re.sub(r'[\\/*?:"<>|]', '_', chapter_title)
-            
-            # 尝试加载摘要文件
-            summary_file = os.path.join(summary_dir, f"{novel_name}_摘要_{chapter_index+1:04d}_{safe_title}.txt")
-            logger.info(f"尝试加载章节摘要: {summary_file}")
-            
-            if os.path.exists(summary_file):
-                with open(summary_file, 'r', encoding='utf-8') as f:
-                    summary_content = f.read()
-                logger.info(f"已加载章节摘要: {summary_file}")
-                return summary_content
-            else:
-                logger.info(f"未找到章节摘要: {summary_file}")
+            if chapter_index < 0 or chapter_index >= len(self.novel_chapters):
+                logger.warning(f"章节索引超出范围: {chapter_index}")
                 return None
+                
+            # 首先从novel_chapters获取摘要
+            if 'summary' in self.novel_chapters[chapter_index]:
+                summary = self.novel_chapters[chapter_index]['summary']
+                if summary:
+                    logger.info(f"从内存加载章节摘要: {self.novel_chapters[chapter_index]['title']}")
+                    return summary
+            
+            # 如果内存中没有摘要，尝试从JSON文件中加载
+            summary_file_path = self.get_summary_file_path()
+            if summary_file_path and os.path.exists(summary_file_path):
+                try:
+                    # 读取JSON文件
+                    import json
+                    with open(summary_file_path, 'r', encoding='utf-8') as f:
+                        summary_data = json.load(f)
+                    
+                    # 查找当前章节
+                    chapter_title = self.novel_chapters[chapter_index]['title']
+                    
+                    # 通过索引和标题查找
+                    for chapter_data in summary_data.get("chapters", []):
+                        index = chapter_data.get("index", 0) - 1  # 转换为0-based索引
+                        title = chapter_data.get("title", "")
+                        
+                        if (index == chapter_index or title == chapter_title) and chapter_data.get("summary"):
+                            summary = chapter_data.get("summary")
+                            # 保存到内存中
+                            self.novel_chapters[chapter_index]['summary'] = summary
+                            logger.info(f"从JSON文件加载章节摘要: {chapter_title}")
+                            return summary
+                        
+                except Exception as e:
+                    logger.error(f"从JSON文件加载章节摘要出错: {str(e)}", exc_info=True)
+                    
+            logger.info(f"未找到章节摘要: {self.novel_chapters[chapter_index]['title']}")
+            return None
+            
         except Exception as e:
             logger.error(f"加载章节摘要出错: {str(e)}", exc_info=True)
             return None
+
+    def get_summary_file_path(self):
+        """获取摘要汇总文件路径"""
+        try:
+            if not hasattr(self, 'current_novel_path') or not self.current_novel_path:
+                logger.warning("未加载小说，无法获取摘要文件路径")
+                return None
+                
+            # 获取小说名称
+            if os.path.isdir(self.current_novel_path):
+                novel_dir = self.current_novel_path
+                novel_name = os.path.basename(novel_dir)
+                logger.debug(f"小说目录模式: current_novel_path={self.current_novel_path}, novel_dir={novel_dir}, novel_name={novel_name}")
+            else:
+                novel_dir = os.path.dirname(self.current_novel_path)
+                novel_name = os.path.splitext(os.path.basename(self.current_novel_path))[0]
+                logger.debug(f"小说文件模式: current_novel_path={self.current_novel_path}, novel_dir={novel_dir}, novel_name={novel_name}")
+            
+            # 如果novel_name是'novels'，说明获取错误，尝试从novel_chapters获取
+            if novel_name == 'novels' and hasattr(self, 'novel_chapters') and self.novel_chapters:
+                # 尝试从小说章节信息中获取更准确的名称
+                first_chapter = self.novel_chapters[0]
+                if 'path' in first_chapter:
+                    chapter_path = first_chapter['path']
+                    # 如果章节路径是文件，获取其父目录名或文件名
+                    if os.path.isfile(chapter_path):
+                        parent_dir = os.path.dirname(chapter_path)
+                        if os.path.basename(parent_dir) != 'novels':
+                            novel_name = os.path.basename(parent_dir)
+                        else:
+                            # 使用文件名前缀（去掉章节编号）
+                            file_name = os.path.splitext(os.path.basename(chapter_path))[0]
+                            # 尝试提取文件名中的非数字部分作为小说名
+                            import re
+                            match = re.search(r'^[\d_]*(.+)$', file_name)
+                            if match:
+                                novel_name = match.group(1)
+                            else:
+                                novel_name = file_name
+                logger.debug(f"从novel_chapters修正: novel_name={novel_name}")
+            
+            # 生成固定格式的文件名：小说名_sum.json
+            summary_file_name = f"{novel_name}_sum.json"
+            summary_file_path = os.path.join(novel_dir, summary_file_name)
+            
+            logger.info(f"摘要文件路径: {summary_file_path}")
+            return summary_file_path
+            
+        except Exception as e:
+            logger.error(f"获取摘要文件路径出错: {str(e)}", exc_info=True)
+            return None
+            
+    def save_summaries_to_file(self):
+        """将所有摘要保存到单一JSON文件中"""
+        try:
+            if not hasattr(self, 'novel_chapters') or not self.novel_chapters:
+                logger.warning("未加载小说章节，无法保存摘要")
+                return False
+                
+            # 获取摘要文件路径
+            summary_file_path = self.get_summary_file_path()
+            if not summary_file_path:
+                logger.warning("无法获取摘要文件路径")
+                return False
+                
+            # 获取小说名称
+            novel_name = os.path.splitext(os.path.basename(summary_file_path))[0].replace("_sum", "")
+            logger.info(f"准备保存摘要，小说名称: {novel_name}, 摘要文件路径: {summary_file_path}")
+            
+            # 创建JSON数据结构
+            import json
+            summary_data = {
+                "novel_name": novel_name,
+                "total_chapters": len(self.novel_chapters),
+                "generation_time": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "chapters": []
+            }
+            
+            # 添加章节摘要
+            success_count = 0
+            for i, chapter in enumerate(self.novel_chapters):
+                try:
+                    # 获取摘要
+                    summary = None
+                    if 'summary' in chapter and chapter['summary']:
+                        summary = chapter['summary']
+                        success_count += 1
+                        
+                    # 添加到JSON数据
+                    chapter_data = {
+                        "index": i + 1,
+                        "title": chapter['title'],
+                        "summary": summary,
+                        "has_summary": summary is not None
+                    }
+                    summary_data["chapters"].append(chapter_data)
+                    
+                except Exception as e:
+                    logger.error(f"保存章节 '{chapter['title']}' 摘要到JSON出错: {str(e)}")
+                    # 添加错误信息到JSON
+                    chapter_data = {
+                        "index": i + 1,
+                        "title": chapter['title'],
+                        "summary": f"[生成摘要出错: {str(e)}]",
+                        "has_summary": False,
+                        "error": str(e)
+                    }
+                    summary_data["chapters"].append(chapter_data)
+            
+            # 添加统计信息
+            summary_data["success_count"] = success_count
+            summary_data["failed_count"] = len(self.novel_chapters) - success_count
+            
+            # 写入JSON文件
+            with open(summary_file_path, 'w', encoding='utf-8') as f:
+                json.dump(summary_data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"所有摘要已保存到JSON文件: {summary_file_path}")
+            return True
+                
+        except Exception as e:
+            logger.error(f"保存摘要到JSON文件出错: {str(e)}", exc_info=True)
+            return False
 
 def save_settings_file():
     """创建默认设置文件"""
