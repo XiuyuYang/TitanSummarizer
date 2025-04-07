@@ -74,4 +74,84 @@ python novel_summarizer.py
 
 ## 关于作者
 
-TitanSummarizer由Allen Yang开发，旨在提供一个简单易用的工具，帮助小说爱好者快速理解和回顾小说内容。 
+TitanSummarizer由Allen Yang开发，旨在提供一个简单易用的工具，帮助小说爱好者快速理解和回顾小说内容。
+
+---
+
+# TitanSummarizer - Novel Chapter Summarization Tool
+
+TitanSummarizer is a desktop application that uses large language models to automatically generate summaries for novel chapters, developed by Allen Yang.
+
+![Application Interface](./images/UI.png)
+
+## Features
+
+- **Intelligent Chapter Parsing**: Automatically identifies and parses novel chapter structures
+- **Multi-Model Support**: Supports various large language models for summary generation, including:
+  - Meta Llama 4 Maverick/Scout
+  - DeepSeek V3
+  - Google Gemini
+  - OpenAI GPT-4.5/O1 series
+- **Summary Length Control**: Customize summary length (50-500 characters)
+- **Local Storage**: Automatically saves generated summaries for future use
+- **Multi-Encoding Support**: Automatically recognizes UTF-8, GBK, and GB18030 encoded novel files
+- **Clean Intuitive Interface**: Three-section layout, simple and straightforward operation
+
+## Interface Guide
+
+- **Top Control Area**: 
+  - Model selection dropdown (supports custom model ID input)
+  - Summary length adjustment
+  - Save/load summary functions
+  - Load novel file button
+- **Left Chapter Navigation**: Displays all detected novel chapters
+- **Right Content Area**: 
+  - Upper section: Displays content of the currently selected chapter
+  - Lower section: Displays/edits the summary of the current chapter
+  - "Generate Summary" button: Uses AI model to generate summary for current chapter
+
+## Installation and Usage
+
+### Requirements
+- Python 2.x
+- PyQt5
+- OpenAI API Client 1.0+
+
+### Installing Dependencies
+
+```
+pip install -r requirements.txt
+```
+
+### How to Use
+
+```
+python novel_summarizer.py
+```
+
+### Recommended Steps
+
+1. Launch the program, which loads `novels/凡人修仙传.txt` by default
+2. Select the chapter you want to summarize from the left chapter list
+3. View the chapter content in the upper right area
+4. Set an appropriate summary length (default is 100 characters)
+5. Click the "Generate Summary" button and wait a moment to see the AI-generated summary below
+6. You can manually edit the summary, and all modifications will be automatically saved
+7. Click "Save All Summaries" to export summaries to a JSON file for future use
+
+## Technical Implementation
+
+- **UI Framework**: PyQt5
+- **API Interface**: OpenRouter API (supports various mainstream large language models)
+- **Default Model**: Meta Llama 4 Maverick
+- **Text Processing**: Chapter extraction algorithm based on regular expressions
+
+## Customization Notes
+
+- You can place your own TXT format novel files in the `novels` directory
+- Summary files are automatically saved as _summaries.json files with the same name as the novel
+- You can directly input any model ID supported by OpenRouter in the interface
+
+## About the Author
+
+TitanSummarizer was developed by Allen Yang, aiming to provide a simple and easy-to-use tool to help novel enthusiasts quickly understand and review novel content. 
