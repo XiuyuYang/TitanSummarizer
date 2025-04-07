@@ -292,23 +292,26 @@ def main():
     if os.path.exists("images/icon.png"):
         app.setWindowIcon(QtGui.QIcon("images/icon.png"))
     
-    # 应用样式表优化UI外观
+    # 应用暗色模式样式表
     app.setStyleSheet("""
         QMainWindow, QWidget {
-            background-color: #f5f5f5;
+            background-color: #2d2d2d;
+            color: #e0e0e0;
         }
         QTextEdit {
-            border: 1px solid #ddd;
+            border: 1px solid #555555;
             border-radius: 3px;
             padding: 5px;
-            background-color: white;
+            background-color: #353535;
+            color: #e0e0e0;
             font-family: 'Microsoft YaHei', Arial;
             font-size: 14px;
         }
         QListWidget {
-            border: 1px solid #ddd;
+            border: 1px solid #555555;
             border-radius: 3px;
-            background-color: white;
+            background-color: #353535;
+            color: #e0e0e0;
             font-family: 'Microsoft YaHei', Arial;
             font-size: 13px;
             padding: 5px;
@@ -317,11 +320,11 @@ def main():
             padding: 5px;
         }
         QListWidget::item:selected {
-            background-color: #4a90e2;
+            background-color: #3a7ab3;
             color: white;
         }
         QPushButton {
-            background-color: #4a90e2;
+            background-color: #3a7ab3;
             color: white;
             border: none;
             border-radius: 3px;
@@ -329,20 +332,46 @@ def main():
             min-width: 80px;
         }
         QPushButton:hover {
-            background-color: #3a80d2;
+            background-color: #4a8ac3;
         }
         QPushButton:pressed {
-            background-color: #2a70c2;
+            background-color: #2a6aa3;
         }
         QLabel {
             font-family: 'Microsoft YaHei', Arial;
+            color: #e0e0e0;
         }
         QComboBox, QSpinBox {
-            border: 1px solid #ddd;
+            border: 1px solid #555555;
             border-radius: 3px;
             padding: 3px;
             min-width: 6em;
-            background-color: white;
+            background-color: #353535;
+            color: #e0e0e0;
+            selection-background-color: #3a7ab3;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #353535;
+            color: #e0e0e0;
+            selection-background-color: #3a7ab3;
+        }
+        QStatusBar {
+            background-color: #2a2a2a;
+            color: #e0e0e0;
+        }
+        QScrollBar:vertical {
+            border: none;
+            background: #353535;
+            width: 10px;
+            margin: 0px 0px 0px 0px;
+        }
+        QScrollBar::handle:vertical {
+            background: #555555;
+            min-height: 20px;
+            border-radius: 5px;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
         }
     """)
     
