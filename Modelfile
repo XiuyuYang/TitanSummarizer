@@ -1,5 +1,0 @@
-FROM D:\Work\AI_Models\Qwen\Qwen2-0.5B-Instruct-GGUF\qwen2-0_5b-instruct-q4_k_m.gguf
-PARAMETER temperature 0.7
-PARAMETER top_p 0.9
-PARAMETER top_k 40
-PARAMETER stop "Human:"
