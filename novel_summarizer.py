@@ -44,6 +44,12 @@ class NovelSummarizer(QtWidgets.QMainWindow):
         self.modelCombo = QtWidgets.QComboBox()
         self.modelCombo.addItems([
             "meta-llama/llama-4-maverick:free",
+            "meta-llama/llama-4-scout:free",
+            "deepseek/deepseek-v3-base:free",
+            "google/gemini-2.5-pro-preview-03-25",
+            "openai/gpt-4.5-preview",
+            "openai/o1-pro",
+
         ])
         self.modelCombo.setEditable(True)
         self.modelCombo.currentIndexChanged.connect(self.changeModel)
@@ -81,41 +87,47 @@ class NovelSummarizer(QtWidgets.QMainWindow):
         controlContainer.setLayout(controlLayout)
         controlContainer.setFixedHeight(50)
         
-        # 主内容区域
-        contentLayout = QtWidgets.QHBoxLayout()
+        # 主内容区域 - 使用QSplitter
+        # 创建水平分割器
+        self.horizontalSplitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         
         # 左侧章节列表
         self.chapterList = QtWidgets.QListWidget()
-        self.chapterList.setFixedWidth(200)
         self.chapterList.currentRowChanged.connect(self.chapterSelected)
         
-        # 右侧内容区域
-        rightLayout = QtWidgets.QVBoxLayout()
+        # 右侧内容区域 - 使用垂直分割器
+        self.verticalSplitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         
         # 正文区域
         self.contentTextEdit = QtWidgets.QTextEdit()
         self.contentTextEdit.setReadOnly(True)
         
         # 摘要区域
-        summaryLayout = QtWidgets.QHBoxLayout()
+        summaryContainer = QtWidgets.QWidget()
+        summaryLayout = QtWidgets.QHBoxLayout(summaryContainer)
+        summaryLayout.setContentsMargins(0, 0, 0, 0)  # 减少边距
+        
         self.summaryTextEdit = QtWidgets.QTextEdit()
-        self.summaryTextEdit.setFixedHeight(120)
         summarizeButton = QtWidgets.QPushButton(u"生成摘要")
         summarizeButton.clicked.connect(self.generateSummary)
         
         summaryLayout.addWidget(self.summaryTextEdit)
         summaryLayout.addWidget(summarizeButton)
         
-        rightLayout.addWidget(self.contentTextEdit, 3)
-        rightLayout.addLayout(summaryLayout, 1)
+        # 将部件添加到分割器
+        self.horizontalSplitter.addWidget(self.chapterList)
+        self.horizontalSplitter.addWidget(self.verticalSplitter)
         
-        # 添加到内容区域
-        contentLayout.addWidget(self.chapterList)
-        contentLayout.addLayout(rightLayout)
+        self.verticalSplitter.addWidget(self.contentTextEdit)
+        self.verticalSplitter.addWidget(summaryContainer)
+        
+        # 设置初始分割比例
+        self.horizontalSplitter.setSizes([200, 1000])  # 左侧章节列表初始宽度为200
+        self.verticalSplitter.setSizes([600, 200])     # 摘要区域初始高度约为200
         
         # 组装主布局
         mainLayout.addWidget(controlContainer)
-        mainLayout.addLayout(contentLayout)
+        mainLayout.addWidget(self.horizontalSplitter)
         
         # 状态栏
         self.statusBar().showMessage(u'准备就绪')
